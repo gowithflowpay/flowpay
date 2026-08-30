@@ -66,6 +66,7 @@ pub struct ConfirmationStatus {
     pub final_enough: bool,
 }
 
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct FactoryVerification {
     pub factory: String,

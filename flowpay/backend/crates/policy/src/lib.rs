@@ -21,6 +21,7 @@ pub struct RecoveryPolicy {
     pub require_human_approval: bool,
 }
 
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RecoveryPolicyInput {
     pub source_chain: ChainKey,
@@ -45,14 +46,9 @@ impl RecoveryPolicy {
     #[must_use]
     pub fn evaluate(&self, input: &RecoveryPolicyInput) -> RecoveryPolicyResult {
         let mut reasons = Vec::new();
-        let chain_name = match &input.source_chain {
-            ChainKey::Base => "base",
-            ChainKey::Bsc => "bsc",
-            ChainKey::Solana => "solana",
-            ChainKey::Custom(value) => value,
-        };
+        let chain_name = input.source_chain.to_string();
 
-        if !self.supported_chains.contains(chain_name) {
+        if !self.supported_chains.contains(&chain_name) {
             reasons.push("unsupported_chain".to_owned());
         }
 

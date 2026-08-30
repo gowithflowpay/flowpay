@@ -33,7 +33,15 @@ impl FromStr for ChainKey {
         match value.to_ascii_lowercase().as_str() {
             "base" => Ok(Self::Base),
             "bsc" | "bnb" | "bnb-smart-chain" => Ok(Self::Bsc),
+            "bsc_testnet" | "bnb_testnet" | "bnb-smart-chain-testnet" => {
+                Ok(Self::Custom("bsc_testnet".to_owned()))
+            }
             "solana" => Ok(Self::Solana),
+            "ethereum_sepolia" | "sepolia" => Ok(Self::Custom("ethereum_sepolia".to_owned())),
+            "base_sepolia" => Ok(Self::Custom("base_sepolia".to_owned())),
+            "arbitrum_sepolia" => Ok(Self::Custom("arbitrum_sepolia".to_owned())),
+            "optimism_sepolia" => Ok(Self::Custom("optimism_sepolia".to_owned())),
+            "polygon_amoy" => Ok(Self::Custom("polygon_amoy".to_owned())),
             other if other.starts_with("custom:") => Ok(Self::Custom(other[7..].to_owned())),
             _ => Err(ChainParseError(value.to_owned())),
         }

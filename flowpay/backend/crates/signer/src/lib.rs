@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use ethers_signers::{LocalWallet, Signer};
 use flowpay_chains::PreparedTransaction;
 use flowpay_domain::{ApprovalId, RecoveryPlanId};
 use serde::{Deserialize, Serialize};
@@ -157,6 +158,115 @@ pub trait RestrictedSigner: Send + Sync {
 /// Local/test-chain signer. It relies on an unlocked Anvil account but still applies the
 /// same plan-hash, class and target restrictions before asking the node to submit a tx.
 #[derive(Clone)]
+pub struct TestnetKeySigner {
+    pub policy: SignerPolicy,
+    pub rpc_url: String,
+    wallet: LocalWallet,
+    client: reqwest::Client,
+}
+
+impl TestnetKeySigner {
+    pub fn from_private_key(
+        policy: SignerPolicy,
+        rpc_url: impl Into<String>,
+        private_key: &str,
+    ) -> Result<Self, SignerError> {
+        let wallet = private_key
+            .parse::<LocalWallet>()
+            .map_err(|_| SignerError::Rpc("invalid signer key".into()))?;
+        Ok(Self {
+            policy,
+            rpc_url: rpc_url.into(),
+            wallet,
+            client: reqwest::Client::new(),
+        })
+    }
+
+    async fn submit(&self, transaction: &PreparedTransaction) -> Result<String, SignerError> {
+        let chain_id: String = self
+            .client
+            .post(&self.rpc_url)
+            .json(&json!({"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}))
+            .send()
+            .await
+            .map_err(|e| SignerError::Rpc(e.to_string()))?
+            .json::<Value>()
+            .await
+            .map_err(|e| SignerError::Rpc(e.to_string()))?
+            .get("result")
+            .and_then(Value::as_str)
+            .ok_or_else(|| SignerError::Rpc("missing chain id".into()))?
+            .to_owned();
+        let chain_id = u64::from_str_radix(chain_id.trim_start_matches("0x"), 16)
+            .map_err(|_| SignerError::Rpc("invalid chain id".into()))?;
+        let nonce: String = self.client.post(&self.rpc_url).json(&json!({"jsonrpc":"2.0","id":1,"method":"eth_getTransactionCount","params":[format!("{:#x}", self.wallet.address()),"pending"]})).send().await.map_err(|e| SignerError::Rpc(e.to_string()))?.json::<Value>().await.map_err(|e| SignerError::Rpc(e.to_string()))?.get("result").and_then(Value::as_str).ok_or_else(|| SignerError::Rpc("missing nonce".into()))?.to_owned();
+        let gas_price: String = self
+            .client
+            .post(&self.rpc_url)
+            .json(&json!({"jsonrpc":"2.0","id":1,"method":"eth_gasPrice","params":[]}))
+            .send()
+            .await
+            .map_err(|e| SignerError::Rpc(e.to_string()))?
+            .json::<Value>()
+            .await
+            .map_err(|e| SignerError::Rpc(e.to_string()))?
+            .get("result")
+            .and_then(Value::as_str)
+            .ok_or_else(|| SignerError::Rpc("missing gas price".into()))?
+            .to_owned();
+        let tx = ethers_core::types::TransactionRequest::new()
+            .to(transaction
+                .to
+                .parse::<ethers_core::types::Address>()
+                .map_err(|_| SignerError::WrongTarget)?)
+            .data(
+                hex::decode(transaction.calldata_hex.trim_start_matches("0x"))
+                    .map_err(|_| SignerError::Rpc("invalid calldata".into()))?,
+            )
+            .value(
+                transaction
+                    .value
+                    .inner()
+                    .to_string()
+                    .parse::<ethers_core::types::U256>()
+                    .map_err(|_| SignerError::Rpc("invalid value".into()))?,
+            )
+            .nonce(
+                ethers_core::types::U256::from_str_radix(nonce.trim_start_matches("0x"), 16)
+                    .map_err(|_| SignerError::Rpc("invalid nonce".into()))?,
+            )
+            .gas_price(
+                ethers_core::types::U256::from_str_radix(gas_price.trim_start_matches("0x"), 16)
+                    .map_err(|_| SignerError::Rpc("invalid gas price".into()))?,
+            )
+            .chain_id(chain_id);
+        let signed = self
+            .wallet
+            .sign_transaction(&tx.into())
+            .await
+            .map_err(|e| SignerError::Rpc(e.to_string()))?;
+        let raw = format!("0x{}", signed.to_string().trim_start_matches("0x"));
+        let response: Value = self
+            .client
+            .post(&self.rpc_url)
+            .json(&json!({"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":[raw]}))
+            .send()
+            .await
+            .map_err(|e| SignerError::Rpc(e.to_string()))?
+            .json()
+            .await
+            .map_err(|e| SignerError::Rpc(e.to_string()))?;
+        if let Some(error) = response.get("error") {
+            return Err(SignerError::Rpc(error.to_string()));
+        }
+        response
+            .get("result")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| SignerError::Rpc("missing tx hash".into()))
+    }
+}
+
 pub struct DevUnlockedSigner {
     pub policy: SignerPolicy,
     pub rpc_url: String,
@@ -173,6 +283,25 @@ impl DevUnlockedSigner {
             from: from.into(),
             client: reqwest::Client::new(),
         }
+    }
+}
+
+#[async_trait]
+impl RestrictedSigner for TestnetKeySigner {
+    async fn submit_recovery(
+        &self,
+        request: &ApprovedSignerRequest,
+    ) -> Result<String, SignerError> {
+        self.policy.validate(request)?;
+        self.submit(&request.transaction).await
+    }
+
+    async fn submit_settlement(
+        &self,
+        request: &SettlementSignerRequest,
+    ) -> Result<String, SignerError> {
+        self.policy.validate_settlement(request)?;
+        self.submit(&request.transaction).await
     }
 }
 

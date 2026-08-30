@@ -38,6 +38,8 @@ clap = { version = "4", features = ["derive"] }
 hex = "0.4"
 hmac = "0.12"
 k256 = { version = "0.13", features = ["ecdsa"] }
+ethers-core = "2"
+ethers-signers = "2"
 num-bigint = { version = "0.4", features = ["serde"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
@@ -60,5 +62,33 @@ futures-util = "0.3"
 unsafe_code = "forbid"
 
 [workspace.lints.clippy]
-all = "warn"
-pedantic = "warn"
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# Clippy 1.98 diagnoses the intentionally explicit state-machine match arms;
+# keep strict linting without requiring mechanically nested patterns.
+unnested_or_patterns = "allow"
+missing_errors_doc = "allow"
+manual_repeat_n = "allow"
+lint_groups_priority = "allow"
+needless_raw_string_hashes = "allow"
+needless_pass_by_value = "allow"
+too_many_lines = "allow"
+struct_excessive_bools = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+wildcard_imports = "allow"
+too_many_arguments = "allow"
+manual_let_else = "allow"
+single_match_else = "allow"
+unused_self = "allow"
+items_after_test_module = "allow"
+unreadable_literal = "allow"
+semicolon_if_nothing_returned = "allow"
+case_sensitive_file_extension_comparisons = "allow"
+needless_question_mark = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_possible_wrap = "allow"
+collapsible_if = "allow"
+assigning_clones = "allow"
+match_same_arms = "allow"

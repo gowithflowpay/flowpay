@@ -60,7 +60,10 @@ impl AtomicAmount {
         }
         let mut atomic = whole.to_owned();
         atomic.push_str(fraction);
-        atomic.extend(std::iter::repeat('0').take(usize::from(decimals) - fraction.len()));
+        atomic.extend(std::iter::repeat_n(
+            '0',
+            usize::from(decimals) - fraction.len(),
+        ));
         let normalized = atomic.trim_start_matches('0');
         if normalized.is_empty() {
             return Ok(Self::zero());

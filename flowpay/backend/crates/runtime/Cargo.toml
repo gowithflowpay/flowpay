@@ -24,6 +24,7 @@ flowpay-signer = { path = "../signer" }
 flowpay-webhooks = { path = "../webhooks" }
 futures-util.workspace = true
 hex.workspace = true
+hmac.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

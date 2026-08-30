@@ -9,6 +9,9 @@ rust-version.workspace = true
 async-trait.workspace = true
 flowpay-chains = { path = "../chains" }
 flowpay-domain = { path = "../domain" }
+ethers-core.workspace = true
+ethers-signers.workspace = true
+hex.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

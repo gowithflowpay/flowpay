@@ -361,7 +361,7 @@ impl InvestigationTools for DatabaseAgentTools {
         });
         let policy = RecoveryPolicy {
             version: "demo-v1".into(),
-            supported_chains: BTreeSet::from(["base".into(), "bsc".into()]),
+            supported_chains: BTreeSet::from([chain.to_string()]),
             supported_assets,
             minimum_recovery_amount: AtomicAmount::from_str("1").unwrap_or_default(),
             maximum_demo_recovery_amount: AtomicAmount::from_decimal("1000", metadata.decimals)

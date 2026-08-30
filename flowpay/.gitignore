@@ -2,6 +2,7 @@
 /target
 /runtime
 .env
+deployer.txt
 .env.*.local
 node_modules
 .next

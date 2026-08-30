@@ -32,33 +32,65 @@ pub struct Config {
     pub agent_max_steps: usize,
     pub agent_retry_budget: usize,
     pub rabbitmq_url: String,
+    pub provider_webhook_secret: Option<String>,
+    pub provider_webhook_path: String,
+    pub alchemy_api_key: Option<String>,
+    pub alchemy_networks: Vec<String>,
 }
 
 impl Config {
     pub fn from_env() -> anyhow::Result<Self> {
         let factory = required("FLOWPAY_FACTORY_ADDRESS")?;
         let mut chains = HashMap::new();
-        chains.insert(
-            ChainKey::Base,
-            ChainConfig {
-                chain: ChainKey::Base,
-                rpc_url: env::var("BASE_RPC_URL")
-                    .unwrap_or_else(|_| "http://127.0.0.1:8545".into()),
-                numeric_chain_id: parse_u64("BASE_CHAIN_ID", 31337)?,
-                factory_address: factory.clone(),
-            },
-        );
-        if let Ok(url) = env::var("BSC_RPC_URL") {
-            chains.insert(
-                ChainKey::Bsc,
-                ChainConfig {
-                    chain: ChainKey::Bsc,
-                    rpc_url: url,
-                    numeric_chain_id: parse_u64("BSC_CHAIN_ID", 31338)?,
-                    factory_address: factory,
-                },
-            );
+        add_chain(&mut chains, ChainKey::Base, "BASE", 31337, &factory)?;
+        if env::var("FLOWPAY_ENV")
+            .unwrap_or_else(|_| "local".into())
+            .eq_ignore_ascii_case("local")
+        {
+            add_chain(&mut chains, ChainKey::Bsc, "BSC", 31338, &factory)?;
         }
+        add_chain(
+            &mut chains,
+            ChainKey::Custom("bsc_testnet".into()),
+            "BSC_TESTNET",
+            97,
+            &factory,
+        )?;
+        add_chain(
+            &mut chains,
+            ChainKey::Custom("ethereum_sepolia".into()),
+            "ETHEREUM_SEPOLIA",
+            11155111,
+            &factory,
+        )?;
+        add_chain(
+            &mut chains,
+            ChainKey::Custom("base_sepolia".into()),
+            "BASE_SEPOLIA",
+            84532,
+            &factory,
+        )?;
+        add_chain(
+            &mut chains,
+            ChainKey::Custom("arbitrum_sepolia".into()),
+            "ARBITRUM_SEPOLIA",
+            421614,
+            &factory,
+        )?;
+        add_chain(
+            &mut chains,
+            ChainKey::Custom("optimism_sepolia".into()),
+            "OPTIMISM_SEPOLIA",
+            11155420,
+            &factory,
+        )?;
+        add_chain(
+            &mut chains,
+            ChainKey::Custom("polygon_amoy".into()),
+            "POLYGON_AMOY",
+            80002,
+            &factory,
+        )?;
         let model_provider = parse_model_provider()?;
         let default_model = if model_provider == "ollama" {
             "qwen2.5-coder:7b"
@@ -100,9 +132,61 @@ impl Config {
             agent_retry_budget: parse_usize("FLOWPAY_AGENT_RETRY_BUDGET", 3)?.clamp(1, 10),
             rabbitmq_url: env::var("RABBITMQ_URL")
                 .unwrap_or_else(|_| "amqp://guest:guest@127.0.0.1:5672/%2f".into()),
+            provider_webhook_secret: env::var("FLOWPAY_PROVIDER_WEBHOOK_SECRET")
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
+            provider_webhook_path: env::var("FLOWPAY_PROVIDER_WEBHOOK_PATH")
+                .unwrap_or_else(|_| "/v1/providers/alchemy/webhook".into()),
+            alchemy_api_key: env::var("ALCHEMY_API_KEY")
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
+            alchemy_networks: env::var("ALCHEMY_NETWORKS")
+                .unwrap_or_default()
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .collect(),
         })
     }
 }
+fn add_chain(
+    chains: &mut HashMap<ChainKey, ChainConfig>,
+    chain: ChainKey,
+    env_prefix: &str,
+    default_chain_id: u64,
+    default_factory: &str,
+) -> anyhow::Result<()> {
+    let rpc_key = format!("{env_prefix}_RPC_URL");
+    let Some(rpc_url) = env::var(&rpc_key)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return Ok(());
+    };
+    let chain_id_key = format!("{env_prefix}_CHAIN_ID");
+    let factory_key = format!("{env_prefix}_FACTORY_ADDRESS");
+    let factory_address = env::var(&factory_key)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| default_factory.to_owned());
+    if !env_prefix.eq("BASE") && !env_prefix.eq("BSC") && factory_address == default_factory {
+        return Err(anyhow!(
+            "{factory_key} is required when {rpc_key} is configured"
+        ));
+    }
+    chains.insert(
+        chain.clone(),
+        ChainConfig {
+            chain,
+            rpc_url,
+            numeric_chain_id: parse_u64(&chain_id_key, default_chain_id)?,
+            factory_address,
+        },
+    );
+    Ok(())
+}
+
 fn required(key: &str) -> anyhow::Result<String> {
     env::var(key).with_context(|| format!("missing {key}"))
 }

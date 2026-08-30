@@ -15,6 +15,7 @@ use flowpay_domain::{
 use flowpay_messaging::{enqueue_command_tx, enqueue_domain_event_tx};
 use flowpay_payments::derive_checkout_salt;
 use flowpay_persistence::{StoreError, StoredClaim};
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -26,6 +27,7 @@ use uuid::Uuid;
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/v1/providers/alchemy/webhook", post(alchemy_webhook))
         .route("/v1/payments", get(list_payments).post(create_payment))
         .route("/v1/payments/{id}", get(get_payment))
         .route("/v1/payments/{id}/cancel", post(cancel_payment))
@@ -44,6 +46,97 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/overview", get(get_overview))
         .route("/v1/merchant/overview", get(get_overview))
         .with_state(state)
+}
+
+async fn alchemy_webhook(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: String,
+) -> Result<StatusCode, ApiError> {
+    let secret = state
+        .config
+        .provider_webhook_secret
+        .as_deref()
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::NOT_IMPLEMENTED,
+                "provider_webhook_not_configured",
+                "provider webhook secret is not configured",
+            )
+        })?;
+    let signature = headers
+        .get("x-alchemy-signature")
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::UNAUTHORIZED,
+                "invalid_provider_signature",
+                "missing Alchemy signature",
+            )
+        })?;
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).map_err(internal)?;
+    mac.update(body.as_bytes());
+    let expected = hex::encode(mac.finalize().into_bytes());
+    let supplied = signature.trim_start_matches("0x");
+    if expected.len() != supplied.len()
+        || !expected
+            .as_bytes()
+            .iter()
+            .zip(supplied.as_bytes())
+            .fold(0_u8, |diff, (left, right)| diff | (left ^ right))
+            .eq(&0)
+    {
+        return Err(ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "invalid_provider_signature",
+            "invalid Alchemy signature",
+        ));
+    }
+    let payload: Value = serde_json::from_str(&body)
+        .map_err(|_| ApiError::bad("invalid_provider_payload", "provider payload must be JSON"))?;
+    let event_id = payload
+        .get("webhookId")
+        .or_else(|| payload.get("id"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            ApiError::bad(
+                "invalid_provider_payload",
+                "Alchemy payload has no event identifier",
+            )
+        })?;
+    let mut tx = state.store.pool().begin().await.map_err(db)?;
+    let inserted = sqlx::query("INSERT INTO provider_webhook_events(provider,event_id,payload) VALUES('alchemy',$1,$2) ON CONFLICT DO NOTHING")
+        .bind(event_id)
+        .bind(&payload)
+        .execute(&mut *tx)
+        .await
+        .map_err(db)?
+        .rows_affected();
+    if inserted == 1 {
+        let aggregate = payload
+            .get("event")
+            .and_then(|event| event.get("activity"))
+            .and_then(Value::as_array)
+            .and_then(|activities| activities.first())
+            .and_then(|activity| activity.get("toAddress"))
+            .and_then(Value::as_str)
+            .unwrap_or("provider");
+        enqueue_command_tx(
+            &mut tx,
+            "payment.reconcile",
+            "payment.reconcile",
+            "PROVIDER_WEBHOOK",
+            aggregate,
+            json!({"provider":"alchemy","event_id":event_id}),
+            None,
+            None,
+        )
+        .await
+        .map_err(internal)?;
+    }
+    tx.commit().await.map_err(db)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn health(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {

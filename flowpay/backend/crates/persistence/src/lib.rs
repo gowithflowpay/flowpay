@@ -20,6 +20,10 @@ pub const MIGRATION_0004_CHAIN_KEYS: &str =
     include_str!("../../../database/migrations/0004_chain_key_canonicalization.sql");
 pub const MIGRATION_0005_MESSAGING: &str =
     include_str!("../../../database/migrations/0005_messaging.sql");
+pub const MIGRATION_0007_PROVIDER_WEBHOOKS: &str =
+    include_str!("../../../database/migrations/0007_provider_webhooks.sql");
+pub const MIGRATION_0008_CHAIN_REGISTRY: &str =
+    include_str!("../../../database/migrations/0008_chain_registry.sql");
 
 #[derive(Debug, Error)]
 pub enum StoreError {

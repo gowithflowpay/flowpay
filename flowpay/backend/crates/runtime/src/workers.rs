@@ -3,7 +3,7 @@ use crate::{
     state::{AppState, ChainRuntime},
 };
 use flowpay_chains::ChainAdapter;
-use flowpay_domain::{AtomicAmount, ChainKey, Payment, PaymentState};
+use flowpay_domain::{ChainKey, Payment, PaymentState};
 use flowpay_messaging::{
     enqueue_command_at_tx, InboxReservation, MessagingError, OutboxStore, RabbitCommandConsumer,
 };
@@ -15,7 +15,7 @@ use flowpay_signer::{
 };
 use serde_json::json;
 use sqlx::Row;
-use std::{collections::BTreeSet, sync::Arc, time::Duration as StdDuration};
+use std::{collections::BTreeSet, time::Duration as StdDuration};
 use time::OffsetDateTime;
 use tracing::{error, info, warn};
 
@@ -923,6 +923,15 @@ fn native_symbol(chain: &ChainKey) -> &'static str {
     match chain {
         ChainKey::Base => "ETH",
         ChainKey::Bsc => "BNB",
+        ChainKey::Custom(value)
+            if matches!(
+                value.as_str(),
+                "base_sepolia" | "ethereum_sepolia" | "arbitrum_sepolia" | "optimism_sepolia"
+            ) =>
+        {
+            "ETH"
+        }
+        ChainKey::Custom(value) if value == "bsc_testnet" => "BNB",
         _ => "NATIVE",
     }
 }

@@ -34,6 +34,7 @@ pub struct ClaimTransitionError {
     pub to: ClaimState,
 }
 
+#[allow(clippy::unnested_or_patterns)]
 impl ClaimState {
     #[must_use]
     pub const fn as_str(self) -> &'static str {

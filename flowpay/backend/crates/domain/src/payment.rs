@@ -32,6 +32,7 @@ pub struct PaymentTransitionError {
     pub to: PaymentState,
 }
 
+#[allow(clippy::unnested_or_patterns)]
 impl PaymentState {
     #[must_use]
     pub const fn as_str(self) -> &'static str {

@@ -252,7 +252,7 @@ impl ChainAdapter for RpcEvmAdapter {
             transaction_hash: r.transaction_hash,
             block_number: quantity_u64(&r.block_number)?,
             block_hash: r.block_hash,
-            success: r.status.as_deref().map_or(true, |s| s != "0x0"),
+            success: r.status.as_deref() != Some("0x0"),
         })
     }
 
