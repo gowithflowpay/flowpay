@@ -3,6 +3,7 @@
 /runtime
 .env
 deployer.txt
+deployer-pk.txt
 .env.*.local
 node_modules
 .next
@@ -13,3 +14,11 @@ coverage
 contracts/broadcast
 contracts/cache
 contracts/out
+
+.next*
+*.tsbuildinfo
+*.zip
+*.tar.gz
+*-local-*.env
+*-before-*.env
+~/

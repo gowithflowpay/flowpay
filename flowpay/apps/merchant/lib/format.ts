@@ -17,5 +17,15 @@ export function moneyFromStableBalances(balances:any[]){
   const dollars=cents/100n,frac=(cents%100n).toString().padStart(2,"0");
   return `$${dollars.toString().replace(/\B(?=(\d{3})+(?!\d))/g,",")}.${frac}`;
 }
-export function networkAsset(chain:string){return chain.toLowerCase()==="bsc"?"/assets/bsc.svg":"/assets/base.svg";}
+export function networkAsset(chain:string){
+  const key=chain.toLowerCase().replace(/^custom:/,"");
+  if(key==="bsc"||key==="bsc_testnet")return "/assets/bsc.svg";
+  if(key==="ethereum_sepolia")return "/assets/ethereum.svg";
+  if(key==="arbitrum_sepolia")return "/assets/arbitrum.svg";
+  return "/assets/base.svg";
+}
+export function networkLabel(chain:string){
+  const key=chain.toLowerCase().replace(/^custom:/,"");
+  return ({base:"Base",bsc:"BNB Smart Chain",base_sepolia:"Base Sepolia",ethereum_sepolia:"Ethereum Sepolia",arbitrum_sepolia:"Arbitrum Sepolia",bsc_testnet:"BSC Testnet"} as Record<string,string>)[key]??chain;
+}
 export function tokenAsset(symbol:string){return symbol.toUpperCase()==="USDT"?"/assets/usdt.svg":"/assets/usdc.svg";}

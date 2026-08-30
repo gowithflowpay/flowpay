@@ -1,0 +1,6 @@
+*.zip
+*.tar.gz
+*-local-*.env
+*-before-*.env
+*-local-*.patch
+

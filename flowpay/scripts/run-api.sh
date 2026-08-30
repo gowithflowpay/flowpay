@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
-[[ -f runtime/local.env ]] || { echo "runtime/local.env missing; run scripts/reset-local.sh first" >&2; exit 1; }
+[[ -f /root/.cargo/env ]] && source /root/.cargo/env
 BSC_OVERRIDE="${FLOWPAY_BSC_RPC_OVERRIDE:-}"
 set -a
 [[ -f .env ]] && source .env
-source runtime/local.env
+if [[ "${FLOWPAY_ENV:-local}" == "local" ]]; then
+  [[ -f runtime/local.env ]] || { echo "runtime/local.env missing; run scripts/reset-local.sh first" >&2; exit 1; }
+  source runtime/local.env
+fi
 set +a
 [[ -n "$BSC_OVERRIDE" ]] && export BSC_RPC_URL="$BSC_OVERRIDE"
 export FLOWPAY_WEBHOOK_ENCRYPTION_KEY="${FLOWPAY_WEBHOOK_ENCRYPTION_KEY:-0000000000000000000000000000000000000000000000000000000000000000}"
