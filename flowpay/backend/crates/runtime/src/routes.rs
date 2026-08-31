@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use sqlx::Row;
+use std::{collections::BTreeSet, time::Duration as StdDuration};
 use std::{path::PathBuf, str::FromStr};
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
@@ -40,6 +41,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/claims/{id}", get(get_claim))
         .route("/v1/claims/{id}/evidence", post(add_evidence))
         .route("/v1/claims/{id}/authorize", post(authorize_claim))
+        .route("/v1/claims/{id}/retry", post(retry_claim))
         .route("/v1/claims/{id}/fund", post(fund_claim))
         .route("/v1/claims/{id}/approve", post(approve_claim))
         .route("/v1/webhooks", get(list_webhooks).post(create_webhook))
@@ -266,6 +268,7 @@ async fn create_payment(
             "configured EVM chains do not produce one recoverable CREATE3 checkout address",
         ));
     }
+    register_checkout_with_alchemy(&state, &address).await?;
     let expires = OffsetDateTime::now_utc()
         + Duration::seconds(req.expires_in_seconds.unwrap_or(1800).clamp(60, 86_400));
     let overpayment = parse_overpayment(req.overpayment_policy.as_deref())?;
@@ -335,6 +338,72 @@ async fn create_payment(
     )
     .await?;
     Ok((StatusCode::CREATED, Json(response)))
+}
+
+async fn register_checkout_with_alchemy(
+    state: &AppState,
+    checkout_address: &str,
+) -> Result<(), ApiError> {
+    if state.config.environment.eq_ignore_ascii_case("local") {
+        return Ok(());
+    }
+    let Some(token) = state.config.alchemy_notify_auth_token.as_deref() else {
+        // Alchemy monitoring not configured; checkout still works via polling.
+        return Ok(());
+    };
+    let missing = state
+        .config
+        .chains
+        .keys()
+        .filter(|chain| !state.config.alchemy_webhook_ids.contains_key(*chain))
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "alchemy_webhook_not_configured",
+            format!(
+                "Alchemy Address Activity webhook IDs are missing for: {}",
+                missing.join(", ")
+            ),
+        ));
+    }
+    let webhook_ids = state
+        .config
+        .alchemy_webhook_ids
+        .values()
+        .collect::<BTreeSet<_>>();
+    for webhook_id in webhook_ids {
+        let response = state
+            .http
+            .patch(&state.config.alchemy_notify_endpoint)
+            .timeout(StdDuration::from_secs(10))
+            .header("X-Alchemy-Token", token)
+            .json(&json!({
+                "webhook_id": webhook_id,
+                "addresses_to_add": [checkout_address],
+                "addresses_to_remove": []
+            }))
+            .send()
+            .await
+            .map_err(|error| {
+                tracing::error!(%error, %webhook_id, "Alchemy checkout registration failed");
+                ApiError::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "alchemy_registration_failed",
+                    "checkout address could not be registered with Alchemy",
+                )
+            })?;
+        if !response.status().is_success() {
+            tracing::error!(status=%response.status(), %webhook_id, "Alchemy rejected checkout registration");
+            return Err(ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "alchemy_registration_rejected",
+                "Alchemy rejected checkout address registration",
+            ));
+        }
+    }
+    Ok(())
 }
 
 async fn get_payment(
@@ -829,6 +898,37 @@ async fn authorize_claim(
     ))
 }
 
+async fn retry_claim(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let merchant = authenticate(&state, &headers).await?;
+    let claim = state
+        .store
+        .get_claim(merchant, &id)
+        .await
+        .map_err(map_store)?;
+    if claim.state != ClaimState::Escalated {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "claim_not_retryable",
+            "only an escalated claim can be retried",
+        ));
+    }
+    state
+        .store
+        .set_claim_state(
+            claim.id,
+            ClaimState::Investigating,
+            "operator_retry_after_system_fix",
+            "MERCHANT",
+        )
+        .await
+        .map_err(db)?;
+    Ok(Json(json!({"id":id,"status":"INVESTIGATING"})))
+}
+
 async fn fund_claim(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1168,7 +1268,7 @@ async fn enqueue_event(
         .map_err(db)
 }
 fn payment_json(p: &Payment, checkout_base_url: &str, merchant_name: &str) -> Value {
-    json!({"id":p.public_id,"address":p.checkout_address.value,"amount":p.expected_amount.to_decimal(p.expected_asset.decimals),"amount_atomic":p.expected_amount,"asset":p.expected_asset.symbol,"chain":p.expected_chain,"status":p.state.as_str(),"expires_at":p.expires_at.to_string(),"reference":p.reference,"merchant_name":merchant_name,"checkout_url":format!("{}/pay/{}",checkout_base_url.trim_end_matches('/'),p.public_id)})
+    json!({"id":p.public_id,"address":p.checkout_address.value,"amount":p.expected_amount.to_decimal(p.expected_asset.decimals),"amount_atomic":p.expected_amount.to_string(),"asset":p.expected_asset.symbol,"chain":p.expected_chain.to_string(),"status":p.state.as_str(),"expires_at":p.expires_at.to_string(),"reference":p.reference,"merchant_name":merchant_name,"checkout_url":format!("{}/pay/{}",checkout_base_url.trim_end_matches('/'),p.public_id)})
 }
 fn parse_overpayment(value: Option<&str>) -> Result<OverpaymentPolicy, ApiError> {
     match value.unwrap_or("REQUIRE_REVIEW") {
