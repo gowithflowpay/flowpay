@@ -39,6 +39,16 @@ pub enum StoreError {
     Messaging(#[from] flowpay_messaging::MessagingError),
 }
 
+#[derive(Clone, Debug)]
+pub struct CheckoutAddressRecord {
+    pub chain: ChainKey,
+    pub numeric_chain_id: u64,
+    pub address: String,
+    pub factory_address: String,
+    pub factory_runtime_code_hash: Option<String>,
+    pub recovery_capable: bool,
+}
+
 #[derive(Clone)]
 pub struct PgStore {
     pool: PgPool,
@@ -136,14 +146,31 @@ impl PgStore {
         &self,
         payment: &Payment,
         salt: [u8; 32],
-        factory: &str,
+        checkout_addresses: &[CheckoutAddressRecord],
         derivation_version: &str,
     ) -> Result<(), StoreError> {
+        if checkout_addresses.is_empty() {
+            return Err(StoreError::Invalid(
+                "at least one checkout address is required".into(),
+            ));
+        }
         let mut tx = self.pool.begin().await?;
         sqlx::query("INSERT INTO payments (id,public_id,merchant_id,merchant_reference,expected_chain,expected_numeric_chain_id,expected_asset_symbol,expected_token_contract,expected_asset_decimals,expected_amount_atomic,state,overpayment_policy,required_confirmations,expires_at) VALUES ($1,$2,$3,$4,$5,NULL,$6,$7,$8,$9::numeric,$10,$11,$12,$13)")
             .bind(payment.id.0).bind(&payment.public_id).bind(payment.merchant_id.0).bind(&payment.reference).bind(payment.expected_chain.to_string()).bind(&payment.expected_asset.symbol).bind(&payment.expected_asset.token_contract).bind(i16::from(payment.expected_asset.decimals)).bind(payment.expected_amount.to_string()).bind(state_name(payment.state)).bind(overpayment_name(&payment.overpayment_policy)).bind(i32::try_from(payment.required_confirmations).unwrap_or(i32::MAX)).bind(payment.expires_at).execute(&mut *tx).await?;
-        sqlx::query("INSERT INTO checkout_addresses (payment_id,address_family,chain,address,salt,factory_address,derivation_version,recovery_capable) VALUES ($1,'EVM_CREATE3',$2,$3,$4,$5,$6,true)")
-            .bind(payment.id.0).bind(payment.expected_chain.to_string()).bind(&payment.checkout_address.value).bind(salt.to_vec()).bind(factory).bind(derivation_version).execute(&mut *tx).await?;
+        for checkout in checkout_addresses {
+            sqlx::query("INSERT INTO checkout_addresses (payment_id,address_family,chain,numeric_chain_id,address,salt,factory_address,factory_runtime_code_hash,derivation_version,recovery_capable) VALUES ($1,'EVM_CREATE3',$2,$3::numeric,$4,$5,$6,$7,$8,$9)")
+                .bind(payment.id.0)
+                .bind(checkout.chain.to_string())
+                .bind(checkout.numeric_chain_id.to_string())
+                .bind(&checkout.address)
+                .bind(salt.to_vec())
+                .bind(&checkout.factory_address)
+                .bind(&checkout.factory_runtime_code_hash)
+                .bind(derivation_version)
+                .bind(checkout.recovery_capable)
+                .execute(&mut *tx)
+                .await?;
+        }
         insert_transition(
             &mut tx,
             payment.id,
@@ -217,7 +244,7 @@ impl PgStore {
         chain: &ChainKey,
     ) -> Result<[u8; 32], StoreError> {
         let bytes: Vec<u8> = sqlx::query_scalar(
-            "SELECT salt FROM checkout_addresses WHERE payment_id=$1 AND chain=$2",
+            "SELECT salt FROM checkout_addresses WHERE payment_id=$1 ORDER BY (chain=$2) DESC, created_at LIMIT 1",
         )
         .bind(payment_id.0)
         .bind(chain.to_string())
@@ -260,6 +287,72 @@ impl PgStore {
         enqueue_domain_event_tx(&mut tx,"flowpay.payments","payment.failed","PAYMENT",public_id,json!({"payment_id":public_id,"merchant_id":merchant_id.0,"status":"CANCELLED","reason":"merchant_cancelled"}),None,None).await?;
         tx.commit().await?;
         self.get_payment(merchant_id, public_id).await
+    }
+
+    pub async fn retry_failed_settlement(
+        &self,
+        merchant_id: MerchantId,
+        public_id: &str,
+    ) -> Result<(), StoreError> {
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query("SELECT id,state,expected_asset_symbol,expected_token_contract,expected_amount_atomic::text AS expected_amount FROM payments WHERE merchant_id=$1 AND public_id=$2 FOR UPDATE")
+            .bind(merchant_id.0)
+            .bind(public_id)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or(StoreError::NotFound)?;
+        let payment_id = PaymentId(row.try_get("id")?);
+        let state: String = row.try_get("state")?;
+        if state != "FAILED" {
+            return Err(StoreError::Invalid(
+                "only a failed payment can retry settlement".into(),
+            ));
+        }
+        let latest_reason: String = sqlx::query_scalar("SELECT reason_code FROM payment_state_transitions WHERE payment_id=$1 ORDER BY id DESC LIMIT 1")
+            .bind(payment_id.0)
+            .fetch_one(&mut *tx)
+            .await?;
+        if !matches!(
+            latest_reason.as_str(),
+            "settlement_signer_rejected" | "settlement_verification_failed"
+        ) {
+            return Err(StoreError::Invalid(
+                "this failure class is not eligible for settlement retry".into(),
+            ));
+        }
+        let covered: bool = sqlx::query_scalar("SELECT COALESCE(sum(amount_atomic),0) >= $4::numeric FROM deposits WHERE payment_id=$1 AND confirmation_status='FINAL' AND classification='EXPECTED_ASSET' AND upper(asset_symbol)=upper($2) AND (($3::text IS NULL AND token_contract IS NULL) OR lower(token_contract)=lower($3))")
+            .bind(payment_id.0)
+            .bind(row.try_get::<String, _>("expected_asset_symbol")?)
+            .bind(row.try_get::<Option<String>, _>("expected_token_contract")?)
+            .bind(row.try_get::<String, _>("expected_amount")?)
+            .fetch_one(&mut *tx)
+            .await?;
+        if !covered {
+            return Err(StoreError::Invalid(
+                "final expected-asset deposits no longer cover the payment".into(),
+            ));
+        }
+        let changed = sqlx::query("UPDATE payments SET state='CONFIRMED',version=version+1,updated_at=now() WHERE id=$1 AND state='FAILED'")
+            .bind(payment_id.0)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        if changed != 1 {
+            return Err(StoreError::ConcurrentUpdate);
+        }
+        insert_transition(
+            &mut tx,
+            payment_id,
+            Some(PaymentState::Failed),
+            PaymentState::Confirmed,
+            "settlement_retry_requested",
+            "MERCHANT",
+            None,
+            None,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
     }
 
     pub async fn payment_deposits(

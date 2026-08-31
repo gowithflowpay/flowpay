@@ -168,6 +168,16 @@ BSC RPC      http://localhost:9545
 Kafka        localhost:9092
 ```
 
+For the configured local or testnet environment, start infrastructure, migrations, the API,
+worker, relay, both web apps, agent mode, and ngrok with one command:
+
+```bash
+make start
+```
+
+Startup verifies identical deployed factory bytecode and CREATE3 checkout prediction across every
+configured EVM recovery network before accepting payments. Logs are written under `runtime/`.
+
 Local model mode uses Ollama by default with `qwen2.5-coder:7b`. Set `FLOWPAY_MODEL_PROVIDER=openai`, `FLOWPAY_AGENT_MODEL`, and `OPENAI_API_KEY` only when using OpenAI instead.
 
 ## Host-mode commands

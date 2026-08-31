@@ -11,7 +11,8 @@ use flowpay_payments::{reconcile, ObservedDeposit, ReconciliationInput};
 use flowpay_persistence::StoredDeposit;
 use flowpay_recovery::{build_factory_erc20_sweep, build_factory_native_sweep};
 use flowpay_signer::{
-    DevUnlockedSigner, RestrictedSigner, SettlementSignerRequest, SignerPolicy, TransactionClass,
+    DevUnlockedSigner, RestrictedSigner, SettlementSignerRequest, SignerPolicy, TestnetKeySigner,
+    TransactionClass,
 };
 use serde_json::json;
 use sqlx::Row;
@@ -702,8 +703,6 @@ async fn settlement_tick_inner(state: &AppState) -> anyhow::Result<()> {
             allowed_classes: BTreeSet::from([class.clone()]),
             factory_address: runtime.factory.clone(),
         };
-        let signer =
-            DevUnlockedSigner::new(policy, &runtime.rpc_url, &state.config.operator_address);
         let request = SettlementSignerRequest {
             payment_id: payment.id,
             transaction_class: class,
@@ -712,7 +711,16 @@ async fn settlement_tick_inner(state: &AppState) -> anyhow::Result<()> {
             settlement_destination: destination.clone(),
             configured_merchant_destination: destination.clone(),
         };
-        let tx_hash = match signer.submit_settlement(&request).await {
+        let submission = if let Some(private_key) = state.config.operator_private_key.as_deref() {
+            TestnetKeySigner::from_private_key(policy, &runtime.rpc_url, private_key)?
+                .submit_settlement(&request)
+                .await
+        } else {
+            DevUnlockedSigner::new(policy, &runtime.rpc_url, &state.config.operator_address)
+                .submit_settlement(&request)
+                .await
+        };
+        let tx_hash = match submission {
             Ok(v) => v,
             Err(e) => {
                 state

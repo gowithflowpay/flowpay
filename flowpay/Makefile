@@ -1,4 +1,7 @@
-.PHONY: dev test e2e backend-test contracts-test merchant checkout migrate seed reset
+.PHONY: start dev test e2e backend-test contracts-test merchant checkout migrate seed reset
+
+start:
+	./scripts/start-all.sh
 
 dev:
 	./scripts/dev.sh

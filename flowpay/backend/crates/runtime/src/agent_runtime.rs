@@ -16,7 +16,8 @@ use flowpay_recovery::{
     RecoveryFacts,
 };
 use flowpay_signer::{
-    ApprovedSignerRequest, DevUnlockedSigner, RestrictedSigner, SignerPolicy, TransactionClass,
+    ApprovedSignerRequest, DevUnlockedSigner, RestrictedSigner, SignerPolicy, TestnetKeySigner,
+    TransactionClass,
 };
 use serde_json::{json, Value};
 use sqlx::Row;
@@ -640,14 +641,10 @@ impl ControlledRecoveryTools for DatabaseAgentTools {
             .map_err(store_err)?;
         let tx = build_live_recover_erc20_transaction(&plan, salt, &runtime.factory)
             .map_err(|e| ToolError::Permanent(e.to_string()))?;
-        let signer = DevUnlockedSigner::new(
-            SignerPolicy {
-                allowed_classes: BTreeSet::from([TransactionClass::RecoverErc20]),
-                factory_address: runtime.factory.clone(),
-            },
-            &runtime.rpc_url,
-            &self.state.config.operator_address,
-        );
+        let policy = SignerPolicy {
+            allowed_classes: BTreeSet::from([TransactionClass::RecoverErc20]),
+            factory_address: runtime.factory.clone(),
+        };
         let request = ApprovedSignerRequest {
             plan_id,
             approval_id,
@@ -658,11 +655,33 @@ impl ControlledRecoveryTools for DatabaseAgentTools {
             transaction: tx,
             expected_factory: runtime.factory.clone(),
         };
-        let tx_hash = signer
-            .submit_recovery(&request)
-            .await
-            .map_err(|e| ToolError::Permanent(e.to_string()))?;
-        sqlx::query("INSERT INTO recovery_executions(recovery_plan_id,approval_id,plan_hash,transaction_class,chain,signer_key_ref,tx_hash,state) VALUES($1,$2,$3,'RECOVER_ERC20',$4,'local-unlocked-operator',$5,'SUBMITTED')").bind(plan_id.0).bind(approval_id.0).bind(&plan_hash).bind(plan.source_chain.to_string()).bind(&tx_hash).execute(self.state.store.pool()).await.map_err(db_err)?;
+        let (tx_hash, signer_key_ref) = if let Some(private_key) =
+            self.state.config.operator_private_key.as_deref()
+        {
+            let signer = TestnetKeySigner::from_private_key(policy, &runtime.rpc_url, private_key)
+                .map_err(|e| ToolError::Permanent(e.to_string()))?;
+            (
+                signer
+                    .submit_recovery(&request)
+                    .await
+                    .map_err(|e| ToolError::Permanent(e.to_string()))?,
+                "configured-testnet-key",
+            )
+        } else {
+            let signer = DevUnlockedSigner::new(
+                policy,
+                &runtime.rpc_url,
+                &self.state.config.operator_address,
+            );
+            (
+                signer
+                    .submit_recovery(&request)
+                    .await
+                    .map_err(|e| ToolError::Permanent(e.to_string()))?,
+                "local-unlocked-operator",
+            )
+        };
+        sqlx::query("INSERT INTO recovery_executions(recovery_plan_id,approval_id,plan_hash,transaction_class,chain,signer_key_ref,tx_hash,state) VALUES($1,$2,$3,'RECOVER_ERC20',$4,$5,$6,'SUBMITTED')").bind(plan_id.0).bind(approval_id.0).bind(&plan_hash).bind(plan.source_chain.to_string()).bind(signer_key_ref).bind(&tx_hash).execute(self.state.store.pool()).await.map_err(db_err)?;
         self.state
             .store
             .set_claim_state(

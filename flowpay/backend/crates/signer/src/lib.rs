@@ -214,6 +214,27 @@ impl TestnetKeySigner {
             .and_then(Value::as_str)
             .ok_or_else(|| SignerError::Rpc("missing gas price".into()))?
             .to_owned();
+        let from = format!("{:#x}", self.wallet.address());
+        let value_hex = format!("0x{}", transaction.value.inner().to_str_radix(16));
+        let gas_limit: String = self
+            .client
+            .post(&self.rpc_url)
+            .json(&json!({"jsonrpc":"2.0","id":1,"method":"eth_estimateGas","params":[{"from":from,"to":transaction.to,"value":value_hex,"data":transaction.calldata_hex}]}))
+            .send()
+            .await
+            .map_err(|e| SignerError::Rpc(e.to_string()))?
+            .json::<Value>()
+            .await
+            .map_err(|e| SignerError::Rpc(e.to_string()))?
+            .get("result")
+            .and_then(Value::as_str)
+            .ok_or_else(|| SignerError::Rpc("missing gas estimate".into()))?
+            .to_owned();
+        let gas_limit =
+            ethers_core::types::U256::from_str_radix(gas_limit.trim_start_matches("0x"), 16)
+                .map_err(|_| SignerError::Rpc("invalid gas estimate".into()))?
+                * ethers_core::types::U256::from(120_u64)
+                / ethers_core::types::U256::from(100_u64);
         let tx = ethers_core::types::TransactionRequest::new()
             .to(transaction
                 .to
@@ -239,13 +260,18 @@ impl TestnetKeySigner {
                 ethers_core::types::U256::from_str_radix(gas_price.trim_start_matches("0x"), 16)
                     .map_err(|_| SignerError::Rpc("invalid gas price".into()))?,
             )
+            .gas(gas_limit)
             .chain_id(chain_id);
-        let signed = self
+        let typed_transaction = tx.into();
+        let signature = self
             .wallet
-            .sign_transaction(&tx.into())
+            .sign_transaction(&typed_transaction)
             .await
             .map_err(|e| SignerError::Rpc(e.to_string()))?;
-        let raw = format!("0x{}", signed.to_string().trim_start_matches("0x"));
+        let raw = format!(
+            "0x{}",
+            hex::encode(typed_transaction.rlp_signed(&signature))
+        );
         let response: Value = self
             .client
             .post(&self.rpc_url)

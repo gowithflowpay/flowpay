@@ -20,6 +20,7 @@ pub struct Config {
     pub proxy_creation_code_hash: String,
     pub factory_runtime_code_hash: Option<String>,
     pub operator_address: String,
+    pub operator_private_key: Option<String>,
     pub faucet_address: Option<String>,
     pub evidence_dir: String,
     pub webhook_encryption_key: Vec<u8>,
@@ -42,11 +43,11 @@ impl Config {
     pub fn from_env() -> anyhow::Result<Self> {
         let factory = required("FLOWPAY_FACTORY_ADDRESS")?;
         let mut chains = HashMap::new();
-        add_chain(&mut chains, ChainKey::Base, "BASE", 31337, &factory)?;
-        if env::var("FLOWPAY_ENV")
+        let is_local = env::var("FLOWPAY_ENV")
             .unwrap_or_else(|_| "local".into())
-            .eq_ignore_ascii_case("local")
-        {
+            .eq_ignore_ascii_case("local");
+        if is_local {
+            add_chain(&mut chains, ChainKey::Base, "BASE", 31337, &factory)?;
             add_chain(&mut chains, ChainKey::Bsc, "BSC", 31338, &factory)?;
         }
         add_chain(
@@ -114,6 +115,9 @@ impl Config {
             proxy_creation_code_hash: required("FLOWPAY_PROXY_CREATION_CODE_HASH")?,
             factory_runtime_code_hash: env::var("FLOWPAY_FACTORY_RUNTIME_CODE_HASH").ok(),
             operator_address: required("FLOWPAY_OPERATOR_ADDRESS")?,
+            operator_private_key: env::var("FLOWPAY_OPERATOR_PRIVATE_KEY")
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
             faucet_address: env::var("FLOWPAY_FAUCET_ADDRESS").ok(),
             evidence_dir: env::var("FLOWPAY_EVIDENCE_DIR")
                 .unwrap_or_else(|_| "./runtime/evidence".into()),
@@ -166,15 +170,15 @@ fn add_chain(
     };
     let chain_id_key = format!("{env_prefix}_CHAIN_ID");
     let factory_key = format!("{env_prefix}_FACTORY_ADDRESS");
-    let factory_address = env::var(&factory_key)
+    let configured_factory = env::var(&factory_key)
         .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| default_factory.to_owned());
-    if !env_prefix.eq("BASE") && !env_prefix.eq("BSC") && factory_address == default_factory {
+        .filter(|value| !value.trim().is_empty());
+    if !env_prefix.eq("BASE") && !env_prefix.eq("BSC") && configured_factory.is_none() {
         return Err(anyhow!(
             "{factory_key} is required when {rpc_key} is configured"
         ));
     }
+    let factory_address = configured_factory.unwrap_or_else(|| default_factory.to_owned());
     chains.insert(
         chain.clone(),
         ChainConfig {

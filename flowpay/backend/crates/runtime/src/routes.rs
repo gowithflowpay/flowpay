@@ -14,7 +14,7 @@ use flowpay_domain::{
 };
 use flowpay_messaging::{enqueue_command_tx, enqueue_domain_event_tx};
 use flowpay_payments::derive_checkout_salt;
-use flowpay_persistence::{StoreError, StoredClaim};
+use flowpay_persistence::{CheckoutAddressRecord, StoreError, StoredClaim};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -31,6 +31,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/payments", get(list_payments).post(create_payment))
         .route("/v1/payments/{id}", get(get_payment))
         .route("/v1/payments/{id}/cancel", post(cancel_payment))
+        .route(
+            "/v1/payments/{id}/retry-settlement",
+            post(retry_payment_settlement),
+        )
         .route("/v1/payments/{id}/deposits", get(get_deposits))
         .route("/v1/claims", get(list_claims).post(create_claim))
         .route("/v1/claims/{id}", get(get_claim))
@@ -229,6 +233,39 @@ async fn create_payment(
     let public_id = format!("pay_{}", payment_id.0.simple());
     let salt = derive_checkout_salt(merchant, payment_id);
     let address = runtime.deriver.checkout_hex(salt);
+    let checkout_addresses: Vec<CheckoutAddressRecord> = state
+        .chains
+        .iter()
+        .map(|(configured_chain, configured_runtime)| {
+            let configured_address = configured_runtime.deriver.checkout_hex(salt);
+            let configured = state
+                .config
+                .chains
+                .get(configured_chain)
+                .expect("configured runtime must have chain configuration");
+            CheckoutAddressRecord {
+                chain: configured_chain.clone(),
+                numeric_chain_id: configured.numeric_chain_id,
+                recovery_capable: configured_address.eq_ignore_ascii_case(&address)
+                    && configured_runtime
+                        .factory
+                        .eq_ignore_ascii_case(&runtime.factory),
+                address: configured_address,
+                factory_address: configured_runtime.factory.clone(),
+                factory_runtime_code_hash: state.config.factory_runtime_code_hash.clone(),
+            }
+        })
+        .collect();
+    if checkout_addresses
+        .iter()
+        .any(|entry| !entry.recovery_capable)
+    {
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "cross_chain_checkout_incompatible",
+            "configured EVM chains do not produce one recoverable CREATE3 checkout address",
+        ));
+    }
     let expires = OffsetDateTime::now_utc()
         + Duration::seconds(req.expires_in_seconds.unwrap_or(1800).clamp(60, 86_400));
     let overpayment = parse_overpayment(req.overpayment_policy.as_deref())?;
@@ -255,7 +292,7 @@ async fn create_payment(
     };
     state
         .store
-        .create_payment(&payment, salt, &runtime.factory, "EVM_CREATE3_V1")
+        .create_payment(&payment, salt, &checkout_addresses, "EVM_CREATE3_V1")
         .await
         .map_err(db)?;
     let merchant_name: String = sqlx::query_scalar("SELECT name FROM merchants WHERE id=$1")
@@ -352,6 +389,29 @@ async fn cancel_payment(
         &state.config.checkout_base_url,
         &name,
     )))
+}
+async fn retry_payment_settlement(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let merchant = authenticate(&state, &headers).await?;
+    state
+        .store
+        .retry_failed_settlement(merchant, &id)
+        .await
+        .map_err(|error| match error {
+            StoreError::NotFound => ApiError::new(
+                StatusCode::NOT_FOUND,
+                "payment_not_found",
+                "payment was not found",
+            ),
+            StoreError::Invalid(message) => ApiError::bad("settlement_retry_rejected", message),
+            other => db(other),
+        })?;
+    Ok(Json(
+        json!({"payment_id":id,"status":"CONFIRMED","retry":"QUEUED"}),
+    ))
 }
 async fn get_deposits(
     State(state): State<AppState>,

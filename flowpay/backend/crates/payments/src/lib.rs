@@ -219,4 +219,14 @@ mod tests {
             PaymentState::WrongAsset
         );
     }
+
+    #[test]
+    fn every_payment_gets_a_distinct_chain_independent_salt() {
+        let merchant = MerchantId(uuid::Uuid::from_u128(1));
+        let first = PaymentId(uuid::Uuid::from_u128(2));
+        let second = PaymentId(uuid::Uuid::from_u128(3));
+        let first_salt = derive_checkout_salt(merchant, first);
+        assert_ne!(first_salt, derive_checkout_salt(merchant, second));
+        assert_eq!(first_salt, derive_checkout_salt(merchant, first));
+    }
 }
