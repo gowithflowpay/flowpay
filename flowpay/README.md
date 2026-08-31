@@ -178,7 +178,7 @@ make start
 Startup verifies identical deployed factory bytecode and CREATE3 checkout prediction across every
 configured EVM recovery network before accepting payments. Logs are written under `runtime/`.
 
-Local model mode uses Ollama by default with `qwen2.5-coder:7b`. Set `FLOWPAY_MODEL_PROVIDER=openai`, `FLOWPAY_AGENT_MODEL`, and `OPENAI_API_KEY` only when using OpenAI instead.
+Model mode uses Ollama exclusively with `qwen2.5-coder:7b`. FlowPay does not switch investigative providers; if Ollama is unavailable, bounded retries end in safe claim escalation.
 
 ## Host-mode commands
 
@@ -208,7 +208,7 @@ Run the real evaluator with:
 ./scripts/run-e2e-evals.sh all
 ```
 
-Model mode requires either the configured local Ollama model or an OpenAI key when the provider is explicitly `openai`.
+Model mode requires the configured local Ollama model. Ollama is the only supported investigative provider.
 
 ## Frontends
 

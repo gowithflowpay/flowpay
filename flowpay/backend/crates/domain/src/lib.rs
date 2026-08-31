@@ -12,4 +12,7 @@ pub use claim::{ClaimDisposition, ClaimState, ClaimTransitionError};
 pub use ids::{ApprovalId, ClaimId, MerchantId, PaymentId, RecoveryPlanId};
 pub use payment::{PaymentState, PaymentTransitionError};
 pub use payment_model::{Asset, OverpaymentPolicy, Payment};
-pub use recovery::{owner_receivable_amount, RecoveryPlan, RecoveryPolicyDecision, RECOVERY_FEE_BPS, RiskFlag, SimulationStatus};
+pub use recovery::{
+    owner_receivable_amount, RecoveryPlan, RecoveryPolicyDecision, RiskFlag, SimulationStatus,
+    RECOVERY_FEE_BPS,
+};

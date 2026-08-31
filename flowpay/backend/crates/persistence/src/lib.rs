@@ -24,6 +24,8 @@ pub const MIGRATION_0007_PROVIDER_WEBHOOKS: &str =
     include_str!("../../../database/migrations/0007_provider_webhooks.sql");
 pub const MIGRATION_0008_CHAIN_REGISTRY: &str =
     include_str!("../../../database/migrations/0008_chain_registry.sql");
+pub const MIGRATION_0009_CHAIN_AWARE_MONITORING: &str =
+    include_str!("../../../database/migrations/0009_chain_aware_monitoring.sql");
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -520,7 +522,7 @@ impl PgStore {
         &self,
         chain: &ChainKey,
     ) -> Result<Vec<PaymentId>, StoreError> {
-        let rows=sqlx::query_scalar::<_,Uuid>("SELECT id FROM payments WHERE expected_chain=$1 AND state IN ('WAITING','DETECTED','CONFIRMING','PARTIALLY_PAID','OVERPAID','WRONG_ASSET','CONFIRMED','SETTLING') ORDER BY created_at").bind(chain.to_string()).fetch_all(&self.pool).await?;
+        let rows=sqlx::query_scalar::<_,Uuid>("SELECT DISTINCT p.id FROM payments p JOIN checkout_addresses c ON c.payment_id=p.id AND c.chain=$1 WHERE p.state IN ('WAITING','DETECTED','CONFIRMING','PARTIALLY_PAID','OVERPAID','WRONG_ASSET','CONFIRMED','SETTLING') ORDER BY p.created_at").bind(chain.to_string()).fetch_all(&self.pool).await?;
         Ok(rows.into_iter().map(PaymentId).collect())
     }
 
@@ -536,11 +538,31 @@ impl PgStore {
             .ok_or(StoreError::NotFound)
     }
 
-    pub async fn monitor_cursor(&self, payment_id: PaymentId) -> Result<Option<u64>, StoreError> {
-        let value: Option<String> = sqlx::query_scalar(
-            "SELECT last_scanned_block::text FROM payment_monitor_cursors WHERE payment_id=$1",
+    pub async fn checkout_address_for_chain(
+        &self,
+        payment_id: PaymentId,
+        chain: &ChainKey,
+    ) -> Result<String, StoreError> {
+        sqlx::query_scalar(
+            "SELECT address FROM checkout_addresses WHERE payment_id=$1 AND chain=$2",
         )
         .bind(payment_id.0)
+        .bind(chain.to_string())
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StoreError::NotFound)
+    }
+
+    pub async fn monitor_cursor(
+        &self,
+        payment_id: PaymentId,
+        chain: &ChainKey,
+    ) -> Result<Option<u64>, StoreError> {
+        let value: Option<String> = sqlx::query_scalar(
+            "SELECT last_scanned_block::text FROM payment_monitor_cursors WHERE payment_id=$1 AND chain=$2",
+        )
+        .bind(payment_id.0)
+        .bind(chain.to_string())
         .fetch_optional(&self.pool)
         .await?;
         value
@@ -558,7 +580,7 @@ impl PgStore {
         height: u64,
         block_hash: Option<&str>,
     ) -> Result<(), StoreError> {
-        sqlx::query("INSERT INTO payment_monitor_cursors(payment_id,chain,last_scanned_block,last_scanned_block_hash) VALUES($1,$2,$3::numeric,$4) ON CONFLICT(payment_id) DO UPDATE SET last_scanned_block=EXCLUDED.last_scanned_block,last_scanned_block_hash=EXCLUDED.last_scanned_block_hash,updated_at=now()")
+        sqlx::query("INSERT INTO payment_monitor_cursors(payment_id,chain,last_scanned_block,last_scanned_block_hash) VALUES($1,$2,$3::numeric,$4) ON CONFLICT(payment_id,chain) DO UPDATE SET last_scanned_block=EXCLUDED.last_scanned_block,last_scanned_block_hash=EXCLUDED.last_scanned_block_hash,updated_at=now()")
             .bind(payment_id.0).bind(chain.to_string()).bind(height.to_string()).bind(block_hash).execute(&self.pool).await?;
         Ok(())
     }

@@ -55,7 +55,11 @@ impl RecoveryPolicy {
         let asset_supported = self.supported_assets.iter().any(|asset| {
             asset.chain == input.source_chain
                 && asset.symbol.eq_ignore_ascii_case(&input.asset_symbol)
-                && asset.token_contract == input.token_contract
+                && match (&asset.token_contract, &input.token_contract) {
+                    (None, None) => true,
+                    (Some(expected), Some(actual)) => expected.eq_ignore_ascii_case(actual),
+                    _ => false,
+                }
         });
         if !asset_supported {
             reasons.push("unsupported_asset".to_owned());
@@ -92,11 +96,33 @@ impl RecoveryPolicy {
             };
         }
 
-        if !input.risk_flags.is_empty() {
+        let approval_risk = input
+            .risk_flags
+            .iter()
+            .any(|flag| matches!(flag, RiskFlag::CrossChain | RiskFlag::AmountMismatch));
+        let escalation_risk = input.risk_flags.iter().any(|flag| {
+            matches!(
+                flag,
+                RiskFlag::CustodialSender
+                    | RiskFlag::FactoryMismatch
+                    | RiskFlag::UnsupportedTokenBehavior
+                    | RiskFlag::BalanceChanged
+                    | RiskFlag::RpcInconsistency
+                    | RiskFlag::AmbiguousOwnership
+            )
+        });
+        if escalation_risk {
             return RecoveryPolicyResult {
                 decision: RecoveryPolicyDecision::RequiresEscalation,
-                reasons: vec!["risk_flags_present".to_owned()],
+                reasons: vec!["high_risk_flags_present".to_owned()],
                 required_approval: false,
+            };
+        }
+        if approval_risk {
+            return RecoveryPolicyResult {
+                decision: RecoveryPolicyDecision::Allowed,
+                reasons: vec!["approval_required_for_claim_exception".to_owned()],
+                required_approval: true,
             };
         }
 
@@ -151,6 +177,39 @@ mod tests {
         assert!(result
             .reasons
             .contains(&"ownership_not_verified".to_owned()));
+    }
+
+    #[test]
+    fn cross_chain_exception_requires_human_approval() {
+        let result = policy().evaluate(&RecoveryPolicyInput {
+            source_chain: ChainKey::Bsc,
+            asset_symbol: "USDT".to_owned(),
+            token_contract: Some("0xtest".to_owned()),
+            amount: amount("50000000"),
+            ownership_verified: true,
+            factory_verified: true,
+            funds_present: true,
+            gas_sufficient: true,
+            risk_flags: vec![RiskFlag::CrossChain],
+        });
+        assert_eq!(result.decision, RecoveryPolicyDecision::Allowed);
+        assert!(result.required_approval);
+    }
+
+    #[test]
+    fn high_risk_exception_requires_escalation() {
+        let result = policy().evaluate(&RecoveryPolicyInput {
+            source_chain: ChainKey::Bsc,
+            asset_symbol: "USDT".to_owned(),
+            token_contract: Some("0xtest".to_owned()),
+            amount: amount("50000000"),
+            ownership_verified: true,
+            factory_verified: true,
+            funds_present: true,
+            gas_sufficient: true,
+            risk_flags: vec![RiskFlag::FactoryMismatch],
+        });
+        assert_eq!(result.decision, RecoveryPolicyDecision::RequiresEscalation);
     }
 
     #[test]

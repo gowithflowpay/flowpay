@@ -37,9 +37,13 @@ const issues:IssueItem[]=[
   {id:"other",title:"Other issue",copy:"Something else happened",icon:"other"},
 ];
 
-const networkLabel:Record<string,string>={base:"Base",bsc:"BNB Smart Chain"};
+const networkLabel:Record<string,string>={
+  base:"Base",bsc:"BNB Smart Chain",bsc_testnet:"BNB Smart Chain Testnet",
+  ethereum_sepolia:"Ethereum Sepolia",base_sepolia:"Base Sepolia",
+  arbitrum_sepolia:"Arbitrum Sepolia",optimism_sepolia:"Optimism Sepolia",polygon_amoy:"Polygon Amoy"
+};
 const assetIcon=(asset:string)=>asset.toUpperCase()==="USDT"?"/assets/usdt.svg":"/assets/usdc.svg";
-const networkIcon=(chain:string)=>chain==="bsc"?"/assets/bsc.svg":"/assets/base.svg";
+const networkIcon=(chain:string)=>chain.startsWith("bsc")?"/assets/bsc.svg":"/assets/base.svg";
 const isEvmAddress=(value:string)=>/^0x[a-fA-F0-9]{40}$/.test(value);
 const isTxHash=(value:string)=>/^0x[a-fA-F0-9]{64}$/.test(value);
 const isAmount=(value:string)=>/^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value)&&!/^0(?:\.0+)?$/.test(value);
@@ -88,10 +92,8 @@ export function ClaimClient(){
         if(cancelled)return;
         setPayment(body);
         setAmount(body.amount||"");
-        if(body.chain==="base")setChain("bsc");
-        else setChain("base");
-        if(String(body.asset).toUpperCase()==="USDC")setAsset("USDT");
-        else setAsset("USDC");
+        setChain(String(body.chain));
+        setAsset(String(body.asset).toUpperCase());
       }catch(err){if(!cancelled)setError(err instanceof Error?err.message:"Unable to load payment");}
       finally{if(!cancelled)setLoading(false);}
     })();
@@ -272,7 +274,16 @@ export function ClaimClient(){
             <div className="expected-strip"><span>Checkout expected</span><strong>{expectedPayment}</strong></div>
             <div className="form-stack">
               <label><span>Transaction hash (TXID)</span><small>Enter the full transaction hash of the payment.</small><input value={tx} onChange={event=>setTx(event.target.value.trim())} placeholder="0x…"/><a href="#" onClick={event=>event.preventDefault()}>How do I find this? <ExternalIcon/></a></label>
-              <label><span>Network used</span><small>Select the blockchain network you actually used.</small><select value={chain} onChange={event=>setChain(event.target.value)}><option value="bsc">BNB Smart Chain</option><option value="base">Base</option></select></label>
+              <label><span>Network used</span><small>Select the blockchain network you actually used.</small><select value={chain} onChange={event=>setChain(event.target.value)}>
+                <option value="bsc">BNB Smart Chain</option>
+                <option value="bsc_testnet">BNB Smart Chain Testnet</option>
+                <option value="base">Base</option>
+                <option value="base_sepolia">Base Sepolia</option>
+                <option value="ethereum_sepolia">Ethereum Sepolia</option>
+                <option value="arbitrum_sepolia">Arbitrum Sepolia</option>
+                <option value="optimism_sepolia">Optimism Sepolia</option>
+                <option value="polygon_amoy">Polygon Amoy</option>
+              </select></label>
               <div className="form-grid two">
                 <label><span>Asset sent</span><small>Select the token you actually sent.</small><select value={asset} onChange={event=>setAsset(event.target.value)}><option>USDT</option><option>USDC</option></select></label>
                 <label><span>Amount sent</span><small>Enter the exact amount you sent.</small><div className="input-suffix"><input value={amount} onChange={event=>setAmount(event.target.value)} inputMode="decimal" placeholder="0.00"/><b>{asset}</b></div></label>

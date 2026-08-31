@@ -50,59 +50,55 @@ impl Config {
             add_chain(&mut chains, ChainKey::Base, "BASE", 31337, &factory)?;
             add_chain(&mut chains, ChainKey::Bsc, "BSC", 31338, &factory)?;
         }
-        add_chain(
-            &mut chains,
-            ChainKey::Custom("bsc_testnet".into()),
-            "BSC_TESTNET",
-            97,
-            &factory,
-        )?;
-        add_chain(
-            &mut chains,
-            ChainKey::Custom("ethereum_sepolia".into()),
-            "ETHEREUM_SEPOLIA",
-            11155111,
-            &factory,
-        )?;
-        add_chain(
-            &mut chains,
-            ChainKey::Custom("base_sepolia".into()),
-            "BASE_SEPOLIA",
-            84532,
-            &factory,
-        )?;
-        add_chain(
-            &mut chains,
-            ChainKey::Custom("arbitrum_sepolia".into()),
-            "ARBITRUM_SEPOLIA",
-            421614,
-            &factory,
-        )?;
-        add_chain(
-            &mut chains,
-            ChainKey::Custom("optimism_sepolia".into()),
-            "OPTIMISM_SEPOLIA",
-            11155420,
-            &factory,
-        )?;
-        add_chain(
-            &mut chains,
-            ChainKey::Custom("polygon_amoy".into()),
-            "POLYGON_AMOY",
-            80002,
-            &factory,
-        )?;
+        if !is_local {
+            add_chain(
+                &mut chains,
+                ChainKey::Custom("bsc_testnet".into()),
+                "BSC_TESTNET",
+                97,
+                &factory,
+            )?;
+            add_chain(
+                &mut chains,
+                ChainKey::Custom("ethereum_sepolia".into()),
+                "ETHEREUM_SEPOLIA",
+                11155111,
+                &factory,
+            )?;
+            add_chain(
+                &mut chains,
+                ChainKey::Custom("base_sepolia".into()),
+                "BASE_SEPOLIA",
+                84532,
+                &factory,
+            )?;
+            add_chain(
+                &mut chains,
+                ChainKey::Custom("arbitrum_sepolia".into()),
+                "ARBITRUM_SEPOLIA",
+                421614,
+                &factory,
+            )?;
+            add_chain(
+                &mut chains,
+                ChainKey::Custom("optimism_sepolia".into()),
+                "OPTIMISM_SEPOLIA",
+                11155420,
+                &factory,
+            )?;
+            add_chain(
+                &mut chains,
+                ChainKey::Custom("polygon_amoy".into()),
+                "POLYGON_AMOY",
+                80002,
+                &factory,
+            )?;
+        }
         let model_provider = parse_model_provider()?;
-        let default_model = if model_provider == "ollama" {
-            "qwen2.5-coder:7b"
-        } else {
-            "gpt-5"
-        };
-        let default_endpoint = if model_provider == "ollama" {
-            "http://127.0.0.1:11434/api/chat"
-        } else {
-            "https://api.openai.com/v1/responses"
-        };
+        // Ollama is the sole investigative provider. Do not silently switch to a
+        // hosted model when the local investigator is unavailable.
+        let default_model = "qwen2.5-coder:7b";
+        let default_endpoint = "http://127.0.0.1:11434/api/chat";
         Ok(Self {
             bind: env::var("FLOWPAY_BIND").unwrap_or_else(|_| "0.0.0.0:8080".into()),
             database_url: required("DATABASE_URL")?,
@@ -240,10 +236,12 @@ fn parse_agent_mode() -> anyhow::Result<String> {
 }
 fn parse_model_provider() -> anyhow::Result<String> {
     let value = env::var("FLOWPAY_MODEL_PROVIDER")
-        .unwrap_or_else(|_| "openai".into())
+        .unwrap_or_else(|_| "ollama".into())
         .to_ascii_lowercase();
     match value.as_str() {
-        "openai" | "ollama" => Ok(value),
-        _ => Err(anyhow!("FLOWPAY_MODEL_PROVIDER must be openai or ollama")),
+        "ollama" => Ok(value),
+        _ => Err(anyhow!(
+            "FlowPay uses Ollama as its only investigative provider; set FLOWPAY_MODEL_PROVIDER=ollama"
+        )),
     }
 }

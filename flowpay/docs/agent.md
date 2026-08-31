@@ -1,5 +1,12 @@
 # Claim / Recovery Agent Boundary
 
+## Ollama is the investigator
+
+In the configured model workflow, Ollama is the primary investigative agent. It selects only the
+allowlisted typed read/verify tools and follows the investigation procedure in
+`docs/ollama-investigation.md`. It is not a fallback that may be bypassed for a claim: if Ollama is
+unavailable after the bounded retry budget, the claim is escalated safely.
+
 ## Role
 
 The agent is an investigator and constrained planner. It is not a wallet and not a generic chain
@@ -22,7 +29,8 @@ operator.
 - `NEEDS_MORE_EVIDENCE`
 - `ESCALATE`
 
-Only deterministic services may convert `RECOVERABLE` into an executable recovery.
+Only deterministic services may convert `RECOVERABLE` into an executable recovery. Cross-chain and
+amount-discrepancy cases require approval; ambiguous, unsupported, or high-risk cases escalate.
 
 ## Tool classes
 

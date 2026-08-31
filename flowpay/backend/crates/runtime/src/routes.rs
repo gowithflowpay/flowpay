@@ -1035,7 +1035,10 @@ async fn test_webhook(
 }
 
 async fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<MerchantId, ApiError> {
-    let key = match headers.get("x-flowpay-api-key").and_then(|v| v.to_str().ok()) {
+    let key = match headers
+        .get("x-flowpay-api-key")
+        .and_then(|v| v.to_str().ok())
+    {
         Some(k) => k,
         None if state.config.environment == "local" => {
             // Dev mode: allow unauthenticated requests from the local merchant dashboard.
@@ -1168,7 +1171,7 @@ fn payment_json(p: &Payment, checkout_base_url: &str, merchant_name: &str) -> Va
     json!({"id":p.public_id,"address":p.checkout_address.value,"amount":p.expected_amount.to_decimal(p.expected_asset.decimals),"amount_atomic":p.expected_amount,"asset":p.expected_asset.symbol,"chain":p.expected_chain,"status":p.state.as_str(),"expires_at":p.expires_at.to_string(),"reference":p.reference,"merchant_name":merchant_name,"checkout_url":format!("{}/pay/{}",checkout_base_url.trim_end_matches('/'),p.public_id)})
 }
 fn parse_overpayment(value: Option<&str>) -> Result<OverpaymentPolicy, ApiError> {
-    match value.unwrap_or("ACCEPT_AND_RECORD") {
+    match value.unwrap_or("REQUIRE_REVIEW") {
         "ACCEPT_AND_RECORD" => Ok(OverpaymentPolicy::AcceptAndRecord),
         "REQUIRE_REVIEW" => Ok(OverpaymentPolicy::RequireReview),
         "REJECT_SETTLEMENT" => Ok(OverpaymentPolicy::RejectSettlement),

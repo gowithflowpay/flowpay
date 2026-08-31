@@ -376,7 +376,28 @@ where
         if plan.policy_decision == flowpay_domain::RecoveryPolicyDecision::NeedsFunding {
             return Ok(AgentRunResult { status:AgentRunStatus::RecoverableAwaitingFunding, concise_rationale:"recovery is technically valid and simulation passed, but the restricted signer lacks test gas".into(),plan_id:Some(plan.id),approval_id:None,recovery_transaction_hash:None,trajectory:trace });
         }
-        // Proven recovery: auto-execute without human approval.
+        if plan.required_approval {
+            let approval = self.tools.request_approval(ctx, plan.id).await?;
+            trace.push(step(
+                seq,
+                "request_approval",
+                serde_json::json!({"plan_id":plan.id}),
+                serde_json::json!({"approval_id":approval.approval_id,"status":approval.status}),
+                "deterministic policy requires a human approval checkpoint",
+                "Cross-chain and amount-discrepancy refunds are never auto-executed.",
+            ));
+            return Ok(AgentRunResult {
+                status: AgentRunStatus::RecoverableAwaitingApproval,
+                concise_rationale:
+                    "recovery passed verification and simulation and is waiting for human approval"
+                        .into(),
+                plan_id: Some(plan.id),
+                approval_id: Some(approval.approval_id),
+                recovery_transaction_hash: None,
+                trajectory: trace,
+            });
+        }
+        // Proven low-risk recovery: auto-execute only after all deterministic gates pass.
         // 10% platform fee is deducted; net amount returned to owner.
         let execution = self.tools.execute_proven_recovery(ctx, plan.id).await?;
         trace.push(step(
@@ -388,12 +409,44 @@ where
             "All deterministic gates passed. No human approval required for proven claims.",
         ));
         if !execution.submitted {
-            return Ok(AgentRunResult { status:AgentRunStatus::Escalated, concise_rationale:"proven recovery execution failed".into(), plan_id:Some(plan.id), approval_id:None, recovery_transaction_hash:None, trajectory:trace });
+            return Ok(AgentRunResult {
+                status: AgentRunStatus::Escalated,
+                concise_rationale: "proven recovery execution failed".into(),
+                plan_id: Some(plan.id),
+                approval_id: None,
+                recovery_transaction_hash: None,
+                trajectory: trace,
+            });
         }
         seq += 1;
-        let verified = self.tools.verify_recovery(ctx, plan.id, &execution.transaction_hash).await?;
-        trace.push(step(seq, "verify_recovery", serde_json::json!({"transaction_hash":execution.transaction_hash}), serde_json::json!({"verified":verified}), "receipt and balance delta verified", "Submission alone is not success."));
-        Ok(AgentRunResult { status:if verified { AgentRunStatus::Recovered } else { AgentRunStatus::Escalated }, concise_rationale:if verified { "proven recovery executed and verified; 10% fee deducted".into() } else { "recovery could not be independently verified".into() }, plan_id:Some(plan.id), approval_id:None, recovery_transaction_hash:Some(execution.transaction_hash), trajectory:trace })
+        let verified = self
+            .tools
+            .verify_recovery(ctx, plan.id, &execution.transaction_hash)
+            .await?;
+        trace.push(step(
+            seq,
+            "verify_recovery",
+            serde_json::json!({"transaction_hash":execution.transaction_hash}),
+            serde_json::json!({"verified":verified}),
+            "receipt and balance delta verified",
+            "Submission alone is not success.",
+        ));
+        Ok(AgentRunResult {
+            status: if verified {
+                AgentRunStatus::Recovered
+            } else {
+                AgentRunStatus::Escalated
+            },
+            concise_rationale: if verified {
+                "proven recovery executed and verified; 10% fee deducted".into()
+            } else {
+                "recovery could not be independently verified".into()
+            },
+            plan_id: Some(plan.id),
+            approval_id: None,
+            recovery_transaction_hash: Some(execution.transaction_hash),
+            trajectory: trace,
+        })
     }
 
     pub async fn execute_after_approval(

@@ -74,7 +74,7 @@ impl ClaimState {
                 | (S::Investigating, S::Escalated)
                 | (S::NeedsMoreEvidence, S::AwaitingEvidence)
                 | (S::NeedsMoreEvidence, S::Escalated)
-                |            (S::Recoverable, S::RecoveryPending)
+                | (S::Recoverable, S::RecoveryPending)
                 | (S::Recoverable, S::ApprovalPending)
                 | (S::Recoverable, S::Escalated)
                 | (S::ApprovalPending, S::RecoveryPending)

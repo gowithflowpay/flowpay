@@ -17,15 +17,19 @@ impl fmt::Display for ChainKey {
             Self::Base => f.write_str("base"),
             Self::Bsc => f.write_str("bsc"),
             Self::Solana => f.write_str("solana"),
-            Self::Custom(value) if matches!(
-                value.as_str(),
-                "bsc_testnet"
-                    | "ethereum_sepolia"
-                    | "base_sepolia"
-                    | "arbitrum_sepolia"
-                    | "optimism_sepolia"
-                    | "polygon_amoy"
-            ) => f.write_str(value),
+            Self::Custom(value)
+                if matches!(
+                    value.as_str(),
+                    "bsc_testnet"
+                        | "ethereum_sepolia"
+                        | "base_sepolia"
+                        | "arbitrum_sepolia"
+                        | "optimism_sepolia"
+                        | "polygon_amoy"
+                ) =>
+            {
+                f.write_str(value)
+            }
             Self::Custom(value) => write!(f, "custom:{value}"),
         }
     }

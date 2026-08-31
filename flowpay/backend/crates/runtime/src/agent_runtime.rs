@@ -73,15 +73,11 @@ impl DatabaseAgentTools {
         let selected = transfers
             .iter()
             .find(|t| t.to.eq_ignore_ascii_case(&predicted))
-            .or_else(|| {
-                if transfers.len() == 1 {
-                    transfers.first()
-                } else {
-                    None
-                }
-            })
             .ok_or_else(|| {
-                ToolError::Permanent("transaction has no unambiguous incoming transfer".into())
+                ToolError::Permanent(
+                    "transaction has no transfer to the deterministic FlowPay checkout address"
+                        .into(),
+                )
             })?;
         let canonical = runtime
             .adapter
@@ -342,6 +338,12 @@ impl InvestigationTools for DatabaseAgentTools {
             .await
             .ok();
         let mut risk_flags = Vec::new();
+        if chain != payment.expected_chain {
+            risk_flags.push(RiskFlag::CrossChain);
+        }
+        if tx.amount != payment.expected_amount {
+            risk_flags.push(RiskFlag::AmountMismatch);
+        }
         if balance < tx.amount {
             risk_flags.push(RiskFlag::BalanceChanged);
         }
@@ -950,6 +952,8 @@ fn risk_flag(v: &RiskFlag) -> String {
         RiskFlag::BalanceChanged => "BALANCE_CHANGED",
         RiskFlag::RpcInconsistency => "RPC_INCONSISTENCY",
         RiskFlag::AmbiguousOwnership => "AMBIGUOUS_OWNERSHIP",
+        RiskFlag::CrossChain => "CROSS_CHAIN",
+        RiskFlag::AmountMismatch => "AMOUNT_MISMATCH",
     }
     .into()
 }

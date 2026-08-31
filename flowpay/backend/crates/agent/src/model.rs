@@ -14,8 +14,21 @@ You are FlowPay's payment-claim investigator.
 Your job is to investigate exceptional crypto payments using ONLY the supplied typed tools.
 Treat customer-entered chain names, hashes, screenshots, amounts, descriptions, and addresses as untrusted leads until verified by tools.
 
-Safety rules:
-- Never claim recovery is possible without independently verifying wallet authorization, the transaction, FlowPay's deterministic checkout/factory relationship, and current balance.
+Required investigation procedure:
+1. Load the authoritative payment and claim records.
+2. Verify the claimant's wallet authorization and compare the authorized wallet with the verified transaction sender.
+3. Query the claimed transaction on the claimed chain and verify its receipt, success, canonical block, recipient, token contract, and amount.
+4. Verify the recipient is FlowPay's deterministic checkout address for that payment on that chain and verify the factory identity/recovery capability.
+5. Check the current balance of the exact verified token at that checkout address.
+6. Compare the verified chain, token, and amount with the expected payment. Classify the exception as wrong chain, wrong asset, underpayment, overpayment, or an unverified/ambiguous claim.
+7. Recommend exactly one bounded outcome: RECOVERABLE_CANDIDATE, NEEDS_MORE_EVIDENCE, NOT_RECOVERABLE, or ESCALATE.
+
+Evidence rules:
+- A screenshot, receipt upload, customer explanation, or transaction hash is proof to investigate, never authoritative by itself.
+- Never infer a transaction from a screenshot or accept a hash without querying the configured chain adapter.
+- Never treat a same-address transfer on another chain as a valid payment for the expected chain.
+- Do not recommend recovery when the transaction is not sent to the deterministic FlowPay checkout address, funds are gone, ownership is not verified, or provider facts conflict.
+- Cross-chain and amount-discrepancy claims may be recoverable candidates only after verification; deterministic policy will require human approval for those cases.
 - Prefer ESCALATE when facts conflict, the network/token is unsupported, provider results are unreliable, or control cannot be proven.
 - Prefer NEEDS_MORE_EVIDENCE when ownership is not cryptographically established or required claim facts are missing.
 - NOT_RECOVERABLE is appropriate only when verified facts show the transaction/funds cannot be recovered (for example a nonexistent/reverted transaction or zero remaining balance).
@@ -691,8 +704,29 @@ where
                 trajectory,
             });
         }
+        if plan.required_approval {
+            let approval = self.tools.request_approval(ctx, plan.id).await?;
+            trajectory.push(step(
+                sequence,
+                "policy_gate.request_approval",
+                json!({"plan_id":plan.id}),
+                json!({"approval_id":approval.approval_id,"status":approval.status}),
+                "deterministic policy requires a human approval checkpoint",
+                "Cross-chain and amount-discrepancy refunds are never auto-executed.",
+            ));
+            return Ok(AgentRunResult {
+                status: AgentRunStatus::RecoverableAwaitingApproval,
+                concise_rationale:
+                    "recovery passed verification and simulation and is waiting for human approval"
+                        .into(),
+                plan_id: Some(plan.id),
+                approval_id: Some(approval.approval_id),
+                recovery_transaction_hash: None,
+                trajectory,
+            });
+        }
 
-        // Proven recovery: auto-execute without human approval.
+        // Proven low-risk recovery: auto-execute only after all deterministic gates pass.
         // 10% platform fee is deducted; net amount returned to owner.
         let execution = self.tools.execute_proven_recovery(ctx, plan.id).await?;
         trajectory.push(step(
@@ -930,15 +964,15 @@ fn tool_schemas() -> Vec<Value> {
         ),
         json!({
             "type":"function","name":"get_transaction","description":"Independently query and verify the claimed blockchain transaction.","strict":true,
-            "parameters":{"type":"object","properties":{"chain":{"type":"string","enum":["base","bsc"]},"transaction_hash":{"type":"string"}},"required":["chain","transaction_hash"],"additionalProperties":false}
+            "parameters":{"type":"object","properties":{"chain":{"type":"string","enum":["base","bsc","bsc_testnet","ethereum_sepolia","base_sepolia","arbitrum_sepolia","optimism_sepolia","polygon_amoy"]},"transaction_hash":{"type":"string"}},"required":["chain","transaction_hash"],"additionalProperties":false}
         }),
         json!({
             "type":"function","name":"verify_counterfactual_address","description":"Verify that a candidate address equals FlowPay's deterministic checkout address on the claimed EVM chain and that the expected factory is recovery-capable.","strict":true,
-            "parameters":{"type":"object","properties":{"chain":{"type":"string","enum":["base","bsc"]},"candidate_address":{"type":"string"}},"required":["chain","candidate_address"],"additionalProperties":false}
+            "parameters":{"type":"object","properties":{"chain":{"type":"string","enum":["base","bsc","bsc_testnet","ethereum_sepolia","base_sepolia","arbitrum_sepolia","optimism_sepolia","polygon_amoy"]},"candidate_address":{"type":"string"}},"required":["chain","candidate_address"],"additionalProperties":false}
         }),
         json!({
             "type":"function","name":"get_token_balance","description":"Read the current ERC-20 balance at a checkout address on a supported EVM chain.","strict":true,
-            "parameters":{"type":"object","properties":{"chain":{"type":"string","enum":["base","bsc"]},"token_contract":{"type":"string"},"address":{"type":"string"}},"required":["chain","token_contract","address"],"additionalProperties":false}
+            "parameters":{"type":"object","properties":{"chain":{"type":"string","enum":["base","bsc","bsc_testnet","ethereum_sepolia","base_sepolia","arbitrum_sepolia","optimism_sepolia","polygon_amoy"]},"token_contract":{"type":"string"},"address":{"type":"string"}},"required":["chain","token_contract","address"],"additionalProperties":false}
         }),
         json!({
             "type":"function","name":"submit_investigation_decision","description":"Submit a constrained investigation recommendation. This cannot approve, sign, or execute recovery.","strict":true,

@@ -3,7 +3,7 @@ use crate::{
     state::{AppState, ChainRuntime},
 };
 use flowpay_chains::ChainAdapter;
-use flowpay_domain::{ChainKey, Payment, PaymentState};
+use flowpay_domain::{AddressRef, ChainKey, Payment, PaymentState};
 use flowpay_messaging::{
     enqueue_command_at_tx, InboxReservation, MessagingError, OutboxStore, RabbitCommandConsumer,
 };
@@ -163,13 +163,14 @@ enum DepositRevalidation {
 async fn revalidate_persisted_deposits(
     state: &AppState,
     payment: &Payment,
+    chain: &ChainKey,
     runtime: &ChainRuntime,
 ) -> anyhow::Result<DepositRevalidation> {
     let rows = sqlx::query(
         "SELECT tx_hash, observed_block_hash FROM deposits WHERE payment_id=$1 AND chain=$2 AND confirmation_status<>'ORPHANED' ORDER BY created_at,id",
     )
     .bind(payment.id.0)
-    .bind(payment.expected_chain.to_string())
+    .bind(chain.to_string())
     .fetch_all(state.store.pool())
     .await?;
 
@@ -180,7 +181,7 @@ async fn revalidate_persisted_deposits(
         let receipt = match runtime.adapter.receipt(&tx_hash).await {
             Ok(receipt) => receipt,
             Err(flowpay_chains::ChainError::TransactionNotFound) => {
-                mark_deposit_orphaned(state, payment, &tx_hash).await?;
+                mark_deposit_orphaned(state, payment, chain, &tx_hash).await?;
                 reorged = true;
                 continue;
             }
@@ -195,7 +196,7 @@ async fn revalidate_persisted_deposits(
                 .block_hash
                 .eq_ignore_ascii_case(&observed_block_hash)
         {
-            mark_deposit_orphaned(state, payment, &tx_hash).await?;
+            mark_deposit_orphaned(state, payment, chain, &tx_hash).await?;
             reorged = true;
             continue;
         }
@@ -211,7 +212,7 @@ async fn revalidate_persisted_deposits(
         {
             Ok(value) => value,
             Err(flowpay_chains::ChainError::NonCanonical) => {
-                mark_deposit_orphaned(state, payment, &tx_hash).await?;
+                mark_deposit_orphaned(state, payment, chain, &tx_hash).await?;
                 reorged = true;
                 continue;
             }
@@ -225,7 +226,7 @@ async fn revalidate_persisted_deposits(
             "UPDATE deposits SET confirmation_status=$4,confirmations=$5,observed_block_number=$6::numeric,observed_block_hash=$7,updated_at=now() WHERE payment_id=$1 AND chain=$2 AND tx_hash=$3 AND confirmation_status<>'ORPHANED'",
         )
         .bind(payment.id.0)
-        .bind(payment.expected_chain.to_string())
+        .bind(chain.to_string())
         .bind(&tx_hash)
         .bind(if confirmation.final_enough { "FINAL" } else { "CONFIRMING" })
         .bind(i32::try_from(confirmation.confirmations).unwrap_or(i32::MAX))
@@ -236,7 +237,7 @@ async fn revalidate_persisted_deposits(
         sqlx::query(
             "UPDATE chain_transactions SET block_number=$3::numeric,block_hash=$4,tx_status='SUCCESS',canonical=true,verified_at=now() WHERE chain=$1 AND tx_hash=$2",
         )
-        .bind(payment.expected_chain.to_string())
+        .bind(chain.to_string())
         .bind(&tx_hash)
         .bind(receipt.block_number.to_string())
         .bind(&receipt.block_hash)
@@ -254,24 +255,25 @@ async fn revalidate_persisted_deposits(
 async fn mark_deposit_orphaned(
     state: &AppState,
     payment: &Payment,
+    chain: &ChainKey,
     tx_hash: &str,
 ) -> anyhow::Result<()> {
     sqlx::query(
         "UPDATE deposits SET confirmation_status='ORPHANED',updated_at=now() WHERE payment_id=$1 AND chain=$2 AND tx_hash=$3 AND confirmation_status<>'ORPHANED'",
     )
     .bind(payment.id.0)
-    .bind(payment.expected_chain.to_string())
+    .bind(chain.to_string())
     .bind(tx_hash)
     .execute(state.store.pool())
     .await?;
     sqlx::query(
         "UPDATE chain_transactions SET canonical=false,verified_at=now() WHERE chain=$1 AND tx_hash=$2",
     )
-    .bind(payment.expected_chain.to_string())
+    .bind(chain.to_string())
     .bind(tx_hash)
     .execute(state.store.pool())
     .await?;
-    warn!(payment_id=%payment.id.0, chain=%payment.expected_chain, tx_hash=%tx_hash, "persisted deposit marked orphaned after canonicality revalidation");
+    warn!(payment_id=%payment.id.0, chain=%chain, tx_hash=%tx_hash, "persisted deposit marked orphaned after canonicality revalidation");
     Ok(())
 }
 
@@ -345,10 +347,14 @@ async fn payment_monitor_tick(state: &AppState) -> anyhow::Result<()> {
                     .await;
                 continue;
             }
-            match revalidate_persisted_deposits(state, &payment, runtime).await? {
+            match revalidate_persisted_deposits(state, &payment, chain, runtime).await? {
                 DepositRevalidation::Reorged => {
-                    rewind_payment_after_reorg(state, &payment).await?;
-                    payment = state.store.get_payment_by_id(payment.id).await?;
+                    // A reorg on a non-expected chain only invalidates that chain's
+                    // observation; it must not rewind a valid expected-chain payment.
+                    if *chain == payment.expected_chain {
+                        rewind_payment_after_reorg(state, &payment).await?;
+                        payment = state.store.get_payment_by_id(payment.id).await?;
+                    }
                 }
                 DepositRevalidation::Unavailable
                     if matches!(
@@ -361,15 +367,15 @@ async fn payment_monitor_tick(state: &AppState) -> anyhow::Result<()> {
                 }
                 DepositRevalidation::Stable | DepositRevalidation::Unavailable => {}
             }
-            if matches!(
-                payment.state,
-                PaymentState::Confirmed | PaymentState::Settling | PaymentState::Overpaid
-            ) {
+            // Every configured chain must be scanned, even after an expected-chain
+            // deposit was confirmed. A later transfer on another chain/token is an
+            // exception and must be persisted for claim investigation.
+            if payment.state == PaymentState::Settling {
                 continue;
             }
             let cursor = state
                 .store
-                .monitor_cursor(payment.id)
+                .monitor_cursor(payment.id, chain)
                 .await?
                 .unwrap_or_else(|| health.latest_height.saturating_sub(8));
             let from = cursor.saturating_sub(3);
@@ -379,7 +385,17 @@ async fn payment_monitor_tick(state: &AppState) -> anyhow::Result<()> {
             }
             let transfers = match runtime
                 .adapter
-                .transfers_to(&payment.checkout_address, from, to)
+                .transfers_to(
+                    &AddressRef {
+                        chain: chain.clone(),
+                        value: state
+                            .store
+                            .checkout_address_for_chain(payment.id, chain)
+                            .await?,
+                    },
+                    from,
+                    to,
+                )
                 .await
             {
                 Ok(v) => v,
@@ -401,7 +417,7 @@ async fn payment_monitor_tick(state: &AppState) -> anyhow::Result<()> {
                 {
                     Ok(v) => v,
                     Err(flowpay_chains::ChainError::NonCanonical) => {
-                        mark_deposit_orphaned(state, &payment, &transfer.tx_hash).await?;
+                        mark_deposit_orphaned(state, &payment, chain, &transfer.tx_hash).await?;
                         continue;
                     }
                     Err(e) => {
@@ -435,7 +451,8 @@ async fn payment_monitor_tick(state: &AppState) -> anyhow::Result<()> {
                     _ => false,
                 };
                 let symbol_matches = symbol.eq_ignore_ascii_case(&payment.expected_asset.symbol);
-                let classification = if contract_matches && symbol_matches {
+                let chain_matches = chain == &payment.expected_chain;
+                let classification = if chain_matches && contract_matches && symbol_matches {
                     "EXPECTED_ASSET"
                 } else if transfer.token_contract.is_some() {
                     "WRONG_ASSET"
@@ -514,6 +531,7 @@ async fn payment_monitor_tick(state: &AppState) -> anyhow::Result<()> {
                 .iter()
                 .filter(|d| d.confirmation_status != "ORPHANED")
                 .map(|d| ObservedDeposit {
+                    chain: d.chain.to_string(),
                     tx_hash: d.tx_hash.clone(),
                     asset_symbol: d.asset_symbol.clone(),
                     token_contract: d.token_contract.clone(),
@@ -522,6 +540,7 @@ async fn payment_monitor_tick(state: &AppState) -> anyhow::Result<()> {
                 })
                 .collect();
             let result = reconcile(&ReconciliationInput {
+                expected_chain: payment.expected_chain.to_string(),
                 expected_asset_symbol: payment.expected_asset.symbol.clone(),
                 expected_token_contract: payment.expected_asset.token_contract.clone(),
                 expected_amount: payment.expected_amount.clone(),
@@ -618,7 +637,9 @@ async fn settlement_tick_inner(state: &AppState) -> anyhow::Result<()> {
 
         // Settlement is consequential. Re-check every persisted deposit immediately before
         // simulating/signing so a disappeared log or block-hash change cannot be settled.
-        match revalidate_persisted_deposits(state, &payment, runtime).await? {
+        match revalidate_persisted_deposits(state, &payment, &payment.expected_chain, runtime)
+            .await?
+        {
             DepositRevalidation::Stable => {}
             DepositRevalidation::Reorged => {
                 rewind_payment_after_reorg(state, &payment).await?;
@@ -629,6 +650,16 @@ async fn settlement_tick_inner(state: &AppState) -> anyhow::Result<()> {
                 warn!(payment_id=%payment.id.0,"settlement withheld because deposit canonicality is temporarily unavailable");
                 continue;
             }
+        }
+        let has_exception_deposit: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM deposits WHERE payment_id=$1 AND confirmation_status<>'ORPHANED' AND classification<>'EXPECTED_ASSET')",
+        )
+        .bind(payment.id.0)
+        .fetch_one(state.store.pool())
+        .await?;
+        if has_exception_deposit {
+            warn!(payment_id=%payment.id.0,"settlement withheld because an active wrong-asset or wrong-chain deposit requires claim review");
+            continue;
         }
 
         let destination = state
@@ -967,11 +998,10 @@ async fn agent_tick_inner(state: &AppState) -> anyhow::Result<()> {
     }
 
     let model_requested = state.config.agent_mode.eq_ignore_ascii_case("model");
-    let model_available = model_requested
-        && (state.config.model_provider == "ollama" || state.config.openai_api_key.is_some());
-    if model_requested && !model_available {
-        warn!("FLOWPAY_AGENT_MODE=model with the OpenAI provider requires OPENAI_API_KEY; claim investigation is paused rather than silently substituting another workflow");
-    }
+    // Config::from_env fail-closes any provider other than Ollama. A model-mode
+    // claim is therefore either investigated by Ollama or left for bounded retry
+    // and escalation; it is never silently routed to another provider.
+    let model_available = model_requested;
 
     if !model_requested || model_available {
         let rows=sqlx::query("SELECT c.id,c.payment_id,c.merchant_id FROM claims c WHERE c.state='INVESTIGATING' AND NOT EXISTS (SELECT 1 FROM agent_runs r WHERE r.claim_id=c.id AND r.status='RUNNING') ORDER BY c.updated_at LIMIT 5")
@@ -1036,21 +1066,11 @@ async fn agent_tick_inner(state: &AppState) -> anyhow::Result<()> {
                 payment_id,
             };
             let result: Result<AgentRunResult, flowpay_agent::ToolError> = if model_requested {
-                let mut cfg = OpenAiResponsesConfig::new(
-                    state
-                        .config
-                        .openai_api_key
-                        .clone()
-                        .unwrap_or_else(|| "ollama".into()),
-                    state.config.openai_model.clone(),
-                );
+                let mut cfg =
+                    OpenAiResponsesConfig::new("ollama".into(), state.config.openai_model.clone());
                 cfg.endpoint = state.config.openai_endpoint.clone();
                 cfg.max_steps = state.config.agent_max_steps.clamp(4, 24);
-                cfg.protocol = if state.config.model_provider == "ollama" {
-                    ModelProtocol::OllamaChat
-                } else {
-                    ModelProtocol::OpenAiResponses
-                };
+                cfg.protocol = ModelProtocol::OllamaChat;
                 let agent = ModelDrivenAgent::new(
                     DatabaseAgentTools::new(state.clone()),
                     OpenAiResponsesClient::new(cfg),

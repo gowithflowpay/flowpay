@@ -31,6 +31,8 @@ pub enum RiskFlag {
     BalanceChanged,
     RpcInconsistency,
     AmbiguousOwnership,
+    CrossChain,
+    AmountMismatch,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

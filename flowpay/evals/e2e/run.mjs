@@ -65,7 +65,7 @@ const report = {
   evaluator: 'flowpay-real-e2e-v1',
   mode,
   generated_at: new Date().toISOString(),
-  evidence_scope: 'Observed through the actual FlowPay REST API, PostgreSQL-backed workers, deployed Solidity contracts and two Anvil chains. Model mode additionally requires a live OpenAI Responses API investigator.',
+  evidence_scope: 'Observed through the actual FlowPay REST API, PostgreSQL-backed workers, deployed Solidity contracts and two Anvil chains. Model mode additionally requires a live Ollama investigator.',
   fixture_runner_is_not_used_for_outcomes: true,
   environment: {
     base_chain_id: 31337,

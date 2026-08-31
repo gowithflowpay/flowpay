@@ -99,6 +99,7 @@ impl PaymentState {
                 | (S::WrongAsset, S::ClaimPending)
                 | (S::Confirmed, S::Settling)
                 | (S::Confirmed, S::Confirming) // canonicality rollback before settlement
+                | (S::Confirmed, S::ClaimPending) // unexpected chain/asset or overpayment exception
                 | (S::Settling, S::Completed)
                 | (S::Settling, S::Failed)
                 | (S::Failed, S::Settling)

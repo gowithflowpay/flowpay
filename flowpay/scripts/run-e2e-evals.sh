@@ -4,8 +4,17 @@ for tool in cargo psql anvil forge cast node curl; do command -v "$tool" >/dev/n
 MODE="${1:-all}"
 [[ "$MODE" =~ ^(baseline|model|all)$ ]] || { echo "usage: $0 [baseline|model|all]" >&2; exit 2; }
 set -a; [[ -f .env ]] && source .env; set +a
-if [[ "$MODE" != "baseline" && "${FLOWPAY_MODEL_PROVIDER:-openai}" == "openai" && -z "${OPENAI_API_KEY:-}" ]]; then echo "OPENAI_API_KEY is required when FLOWPAY_MODEL_PROVIDER=openai" >&2; exit 2; fi
-if [[ "$MODE" != "baseline" && "${FLOWPAY_MODEL_PROVIDER:-openai}" == "ollama" ]]; then curl -fsS "${FLOWPAY_MODEL_ENDPOINT:-http://127.0.0.1:11434/api/chat}" -o /dev/null -X POST -H 'content-type: application/json' --data "{\"model\":\"${FLOWPAY_AGENT_MODEL:-qwen2.5-coder:7b}\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply OK\"}],\"stream\":false}" || { echo "Ollama model endpoint is unavailable" >&2; exit 2; }; fi
+if [[ "$MODE" != "baseline" && "${FLOWPAY_MODEL_PROVIDER:-ollama}" == "ollama" ]]; then
+  ollama_ready=0
+  for _ in 1 2 3; do
+    if curl -fsS --max-time 180 "${FLOWPAY_MODEL_ENDPOINT:-http://127.0.0.1:11434/api/chat}" -o /dev/null -X POST -H 'content-type: application/json' --data "{\"model\":\"${FLOWPAY_AGENT_MODEL:-qwen2.5-coder:7b}\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply OK\"}],\"stream\":false}"; then
+      ollama_ready=1
+      break
+    fi
+    sleep 2
+  done
+  [[ "$ollama_ready" == 1 ]] || { echo "Ollama model endpoint is unavailable" >&2; exit 2; }
+fi
 mkdir -p runtime evals/results/e2e evals/trajectories/e2e
 cargo build --manifest-path backend/Cargo.toml -q -p flowpay-api-server -p flowpay-worker -p flowpay-event-relay
 API_PID=""; WORKER_PID=""; RELAY_PID=""; PROXY_PID=""; SINK_PID=""
@@ -18,8 +27,8 @@ run_mode(){
   node evals/e2e/webhook-sink.mjs >"runtime/webhook-sink-${mode}.log" 2>&1 & SINK_PID=$!
   for _ in $(seq 1 40); do curl -fsS http://127.0.0.1:9546/__status >/dev/null 2>&1 && curl -fsS http://127.0.0.1:9555/__status >/dev/null 2>&1 && break; sleep .1; done
   ./scripts/run-event-relay.sh >"runtime/event-relay-${mode}.log" 2>&1 & RELAY_PID=$!
-  FLOWPAY_BSC_RPC_OVERRIDE=http://127.0.0.1:9546 FLOWPAY_AGENT_MODE="$mode" ./scripts/run-worker.sh "$mode" >"runtime/worker-${mode}.log" 2>&1 & WORKER_PID=$!
-  FLOWPAY_BSC_RPC_OVERRIDE=http://127.0.0.1:9546 FLOWPAY_AGENT_MODE="$mode" ./scripts/run-api.sh "$mode" >"runtime/api-${mode}.log" 2>&1 & API_PID=$!
+  FLOWPAY_ENV_OVERRIDE=local FLOWPAY_BSC_RPC_OVERRIDE=http://127.0.0.1:9546 FLOWPAY_AGENT_MODE="$mode" ./scripts/run-worker.sh "$mode" >"runtime/worker-${mode}.log" 2>&1 & WORKER_PID=$!
+  FLOWPAY_ENV_OVERRIDE=local FLOWPAY_BSC_RPC_OVERRIDE=http://127.0.0.1:9546 FLOWPAY_AGENT_MODE="$mode" ./scripts/run-api.sh "$mode" >"runtime/api-${mode}.log" 2>&1 & API_PID=$!
   local ok=0
   for _ in $(seq 1 120); do
     if curl -fsS http://127.0.0.1:8080/health >/dev/null 2>&1; then ok=1; break; fi

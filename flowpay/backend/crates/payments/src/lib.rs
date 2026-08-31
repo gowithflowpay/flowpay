@@ -7,6 +7,7 @@ const SALT_DOMAIN: &[u8] = b"FLOWPAY_EVM_CHECKOUT_V1";
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ObservedDeposit {
+    pub chain: String,
     pub tx_hash: String,
     pub asset_symbol: String,
     pub token_contract: Option<String>,
@@ -16,6 +17,7 @@ pub struct ObservedDeposit {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ReconciliationInput {
+    pub expected_chain: String,
     pub expected_asset_symbol: String,
     pub expected_token_contract: Option<String>,
     pub expected_amount: AtomicAmount,
@@ -67,6 +69,7 @@ pub fn reconcile(input: &ReconciliationInput) -> Result<ReconciliationResult, Re
     let mut all_expected_final = true;
 
     for deposit in &input.deposits {
+        let chain_matches = deposit.chain.eq_ignore_ascii_case(&input.expected_chain);
         let symbol_matches = deposit
             .asset_symbol
             .eq_ignore_ascii_case(&input.expected_asset_symbol);
@@ -75,7 +78,7 @@ pub fn reconcile(input: &ReconciliationInput) -> Result<ReconciliationResult, Re
             (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
             _ => false,
         };
-        if symbol_matches && contract_matches {
+        if chain_matches && symbol_matches && contract_matches {
             any_expected = true;
             if deposit.final_enough {
                 total = total.checked_add(&deposit.amount);
@@ -83,12 +86,18 @@ pub fn reconcile(input: &ReconciliationInput) -> Result<ReconciliationResult, Re
                 all_expected_final = false;
             }
         } else {
+            // A token transfer on another chain is an exception even when the token
+            // contract/symbol happens to match the expected asset.
             wrong_asset = true;
         }
     }
 
     let (next, reason) = if wrong_asset && !any_expected {
         (PaymentState::WrongAsset, "wrong_asset_detected")
+    } else if wrong_asset {
+        // Mixed expected/unexpected assets are never a successful payment. Keep the
+        // expected deposit visible, but require an explicit claim for the exception.
+        (PaymentState::ClaimPending, "mixed_assets_requires_review")
     } else if any_expected && !all_expected_final {
         (PaymentState::Confirming, "awaiting_confirmations")
     } else if total < input.expected_amount {
@@ -148,6 +157,7 @@ mod tests {
     }
     fn dep(amount: &str, final_enough: bool) -> ObservedDeposit {
         ObservedDeposit {
+            chain: "base".into(),
             tx_hash: "0x1".into(),
             asset_symbol: "USDC".into(),
             token_contract: Some("0xusdc".into()),
@@ -157,11 +167,12 @@ mod tests {
     }
     fn input(deposits: Vec<ObservedDeposit>) -> ReconciliationInput {
         ReconciliationInput {
+            expected_chain: "base".into(),
             expected_asset_symbol: "USDC".into(),
             expected_token_contract: Some("0xusdc".into()),
             expected_amount: a("100"),
             current_state: PaymentState::Waiting,
-            overpayment_policy: OverpaymentPolicy::AcceptAndRecord,
+            overpayment_policy: OverpaymentPolicy::RequireReview,
             deposits,
         }
     }
@@ -192,12 +203,32 @@ mod tests {
         );
     }
     #[test]
-    fn overpayment_is_recorded() {
+    fn overpayment_requires_review_by_default() {
         assert_eq!(
             reconcile(&input(vec![dep("101", true)]))
                 .unwrap()
                 .next_state,
+            PaymentState::ClaimPending
+        );
+    }
+
+    #[test]
+    fn explicit_accept_policy_records_overpayment() {
+        let mut request = input(vec![dep("101", true)]);
+        request.overpayment_policy = OverpaymentPolicy::AcceptAndRecord;
+        assert_eq!(
+            reconcile(&request).unwrap().next_state,
             PaymentState::Overpaid
+        );
+    }
+
+    #[test]
+    fn same_asset_on_the_wrong_chain_requires_review() {
+        let mut wrong_chain = dep("100", true);
+        wrong_chain.chain = "bsc_testnet".into();
+        assert_eq!(
+            reconcile(&input(vec![wrong_chain])).unwrap().next_state,
+            PaymentState::WrongAsset
         );
     }
     #[test]
@@ -217,6 +248,19 @@ mod tests {
         assert_eq!(
             reconcile(&input(vec![d])).unwrap().next_state,
             PaymentState::WrongAsset
+        );
+    }
+
+    #[test]
+    fn mixed_assets_require_a_claim() {
+        let mut wrong = dep("10", true);
+        wrong.asset_symbol = "USDT".into();
+        wrong.token_contract = Some("0xusdt".into());
+        assert_eq!(
+            reconcile(&input(vec![dep("100", true), wrong]))
+                .unwrap()
+                .next_state,
+            PaymentState::ClaimPending
         );
     }
 

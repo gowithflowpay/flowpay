@@ -9,7 +9,7 @@
 - Foundry (`forge`, `anvil`, and `cast`)
 - Node.js 20 or newer
 - `psql`, `pg_isready`, `curl`, and `jq` on `PATH`
-- Ollama with a tool-capable local model, or an optional OpenAI key
+- Ollama with a tool-capable local model
 
 PostgreSQL, RabbitMQ, and Kafka run as native services. Configure their endpoints in `.env`.
 
@@ -46,7 +46,7 @@ export FLOWPAY_AGENT_MODEL=qwen2.5-coder:7b
 make dev
 ```
 
-To use OpenAI, select `FLOWPAY_MODEL_PROVIDER=openai` and provide `OPENAI_API_KEY`. Model mode does not silently switch providers.
+Ollama is the only supported investigative provider. If Ollama is unavailable, the worker retries within its configured budget and escalates the claim safely.
 
 ## Quality gates
 
