@@ -138,7 +138,8 @@ export function CheckoutClient({paymentId,home=false}:{paymentId:string;home?:bo
   const status=payment.status||"WAITING";
   const [statusTitle,statusText]=stateCopy(status);
   const isDone=status==="COMPLETED"||status==="RECOVERED";
-  const canClaim=!isDone&&!new Set(["CANCELLED","EXPIRED"]).has(status);
+  // Show claim link for any non-terminal state, including expired — users who sent funds need recovery.
+  const canClaim=!isDone;
 
   return <main className={`checkout-shell${home?" checkout-preview":""}`}>
     <header className="payment-header"><span/><Brand/><LanguageButton/></header>

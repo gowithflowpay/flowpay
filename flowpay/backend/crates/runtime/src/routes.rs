@@ -10,7 +10,7 @@ use flowpay_chains::ChainAdapter;
 use flowpay_claims::{new_wallet_challenge, verify_eip191_signature, WalletChallenge};
 use flowpay_domain::{
     AddressRef, AtomicAmount, ChainKey, ClaimId, ClaimState, MerchantId, OverpaymentPolicy,
-    Payment, PaymentId,
+    Payment, PaymentId, PaymentState,
 };
 use flowpay_messaging::{enqueue_command_tx, enqueue_domain_event_tx};
 use flowpay_payments::derive_checkout_salt;
@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use sqlx::Row;
-use std::{collections::BTreeSet, time::Duration as StdDuration};
+use std::time::Duration as StdDuration;
 use std::{path::PathBuf, str::FromStr};
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
@@ -348,62 +348,167 @@ async fn register_checkout_with_alchemy(
         return Ok(());
     }
     let Some(token) = state.config.alchemy_notify_auth_token.as_deref() else {
-        // Alchemy monitoring not configured; checkout still works via polling.
+        tracing::debug!("ALCHEMY_NOTIFY_AUTH_TOKEN not set; skipping Alchemy registration");
         return Ok(());
     };
-    let missing = state
-        .config
-        .chains
-        .keys()
-        .filter(|chain| !state.config.alchemy_webhook_ids.contains_key(*chain))
-        .map(ToString::to_string)
-        .collect::<Vec<_>>();
-    if !missing.is_empty() {
-        return Err(ApiError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "alchemy_webhook_not_configured",
-            format!(
-                "Alchemy Address Activity webhook IDs are missing for: {}",
-                missing.join(", ")
-            ),
-        ));
-    }
-    let webhook_ids = state
-        .config
-        .alchemy_webhook_ids
-        .values()
-        .collect::<BTreeSet<_>>();
-    for webhook_id in webhook_ids {
+
+    // Networks to monitor for checkout address activity.
+    let monitored_networks: Vec<(&str, &str)> = vec![
+        ("BASE_SEPOLIA", "base_sepolia"),
+        ("ETHEREUM_SEPOLIA", "ethereum_sepolia"),
+    ];
+
+    for (env_suffix, chain_name) in &monitored_networks {
+        // 1. Use pre-configured webhook ID if available.
+        let webhook_id = state.config.alchemy_webhook_ids.get(
+            &ChainKey::Custom((*chain_name).into()),
+        );
+
+        let resolved_id = match webhook_id {
+            Some(id) => id.clone(),
+            None => {
+                // 2. Auto-discover: list existing webhooks and find an ADDRESS_ACTIVITY one
+                //    for this network, or create one.
+                match auto_discover_or_create_webhook(state, token, env_suffix).await {
+                    Ok(id) => id,
+                    Err(error) => {
+                        tracing::warn!(error=?error, %chain_name, "Alchemy webhook auto-discovery failed; skipping");
+                        continue;
+                    }
+                }
+            }
+        };
+
         let response = state
             .http
             .patch(&state.config.alchemy_notify_endpoint)
             .timeout(StdDuration::from_secs(10))
             .header("X-Alchemy-Token", token)
             .json(&json!({
-                "webhook_id": webhook_id,
+                "webhook_id": &resolved_id,
                 "addresses_to_add": [checkout_address],
                 "addresses_to_remove": []
             }))
             .send()
-            .await
-            .map_err(|error| {
-                tracing::error!(%error, %webhook_id, "Alchemy checkout registration failed");
-                ApiError::new(
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "alchemy_registration_failed",
-                    "checkout address could not be registered with Alchemy",
-                )
-            })?;
-        if !response.status().is_success() {
-            tracing::error!(status=%response.status(), %webhook_id, "Alchemy rejected checkout registration");
-            return Err(ApiError::new(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "alchemy_registration_rejected",
-                "Alchemy rejected checkout address registration",
-            ));
+            .await;
+
+        match response {
+            Ok(resp) if resp.status().is_success() => {
+                tracing::info!(%chain_name, webhook_id=%resolved_id, %checkout_address, "Alchemy checkout address registered");
+            }
+            Ok(resp) => {
+                tracing::warn!(status=%resp.status(), %chain_name, webhook_id=%resolved_id, "Alchemy rejected checkout registration");
+            }
+            Err(error) => {
+                tracing::warn!(%error, %chain_name, "Alchemy registration request failed");
+            }
         }
     }
     Ok(())
+}
+
+/// Auto-discover an existing Alchemy ADDRESS_ACTIVITY webhook for the given network,
+/// or create one if none exists. Returns the webhook ID.
+async fn auto_discover_or_create_webhook(
+    state: &AppState,
+    token: &str,
+    network_env_suffix: &str,
+) -> Result<String, ApiError> {
+    let alchemy_api_base = "https://dashboard.alchemy.com/api";
+
+    // List existing webhooks.
+    let list_response = state
+        .http
+        .get(format!("{}/get-webhooks", alchemy_api_base))
+        .timeout(StdDuration::from_secs(10))
+        .header("X-Alchemy-Token", token)
+        .send()
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "Alchemy webhook list request failed");
+            ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "alchemy_api_unavailable",
+                "could not list Alchemy webhooks",
+            )
+        })?;
+
+    if list_response.status().is_success() {
+        let body: Value = list_response.json().await.unwrap_or_default();
+        if let Some(webhooks) = body.get("data").and_then(Value::as_array) {
+            for webhook in webhooks {
+                let w_type = webhook.get("type").and_then(Value::as_str).unwrap_or("");
+                let w_network = webhook.get("network").and_then(Value::as_str).unwrap_or("");
+                if w_type == "ADDRESS_ACTIVITY"
+                    && w_network.eq_ignore_ascii_case(network_env_suffix)
+                {
+                    if let Some(id) = webhook.get("id").and_then(Value::as_str) {
+                        tracing::info!(webhook_id=%id, %network_env_suffix, "Found existing Alchemy webhook");
+                        return Ok(id.to_owned());
+                    }
+                }
+            }
+        }
+    }
+
+    // No existing webhook found; create one.
+    let create_response = state
+        .http
+        .post(format!("{}/create-webhook", alchemy_api_base))
+        .timeout(StdDuration::from_secs(10))
+        .header("X-Alchemy-Token", token)
+        .json(&json!({
+            "type": "ADDRESS_ACTIVITY",
+            "network": network_env_suffix,
+            "name": format!("FlowPay checkout monitor ({})", network_env_suffix),
+            "addresses_to_add": [],
+        }))
+        .send()
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "Alchemy webhook create request failed");
+            ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "alchemy_api_unavailable",
+                "could not create Alchemy webhook",
+            )
+        })?;
+
+    if !create_response.status().is_success() {
+        let status = create_response.status();
+        let body = create_response.text().await.unwrap_or_default();
+        tracing::error!(%status, body=%body, %network_env_suffix, "Alchemy webhook creation rejected");
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "alchemy_webhook_create_failed",
+            format!("failed to create Alchemy webhook for {}", network_env_suffix),
+        ));
+    }
+
+    let body: Value = create_response.json().await.map_err(|error| {
+        tracing::error!(%error, "Alchemy create webhook response not JSON");
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "alchemy_api_error",
+            "unexpected Alchemy response",
+        )
+    })?;
+
+    let id = body
+        .get("data")
+        .and_then(|d| d.get("id"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            tracing::error!(body=%body, %network_env_suffix, "Alchemy create webhook response missing id");
+            ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "alchemy_api_error",
+                "Alchemy webhook creation returned no ID",
+            )
+        })?;
+
+    tracing::info!(webhook_id=%id, %network_env_suffix, "Created new Alchemy webhook");
+    Ok(id.to_owned())
 }
 
 async fn get_payment(
@@ -915,6 +1020,24 @@ async fn retry_claim(
             "claim_not_retryable",
             "only an escalated claim can be retried",
         ));
+    }
+    let payment = state
+        .store
+        .get_payment_by_id(claim.payment_id)
+        .await
+        .map_err(map_store)?;
+    if payment.state == PaymentState::Escalated {
+        state
+            .store
+            .set_payment_state(
+                claim.payment_id,
+                PaymentState::ClaimPending,
+                "operator_retry_after_system_fix",
+                None,
+                None,
+            )
+            .await
+            .map_err(db)?;
     }
     state
         .store
