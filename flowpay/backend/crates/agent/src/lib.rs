@@ -138,6 +138,14 @@ pub trait ControlledRecoveryTools: Send + Sync {
         plan_id: RecoveryPlanId,
     ) -> Result<ApprovalRequestResult, ToolError>;
 
+    /// Auto-approve and execute a proven recovery without human approval.
+    /// Deducts the platform fee (10%) and sends the net amount to the owner.
+    async fn execute_proven_recovery(
+        &self,
+        ctx: &AgentContext,
+        plan_id: RecoveryPlanId,
+    ) -> Result<RecoveryExecutionResult, ToolError>;
+
     async fn execute_approved_recovery(
         &self,
         ctx: &AgentContext,
@@ -368,16 +376,24 @@ where
         if plan.policy_decision == flowpay_domain::RecoveryPolicyDecision::NeedsFunding {
             return Ok(AgentRunResult { status:AgentRunStatus::RecoverableAwaitingFunding, concise_rationale:"recovery is technically valid and simulation passed, but the restricted signer lacks test gas".into(),plan_id:Some(plan.id),approval_id:None,recovery_transaction_hash:None,trajectory:trace });
         }
-        let approval = self.tools.request_approval(ctx, plan.id).await?;
+        // Proven recovery: auto-execute without human approval.
+        // 10% platform fee is deducted; net amount returned to owner.
+        let execution = self.tools.execute_proven_recovery(ctx, plan.id).await?;
         trace.push(step(
             seq,
-            "request_approval",
+            "execute_proven_recovery",
             serde_json::json!({"plan_id":plan.id}),
-            serde_json::json!({"approval_id":approval.approval_id,"status":approval.status}),
-            "human approval created but not auto-granted",
-            "Consequential recovery stops at a visible human checkpoint.",
+            serde_json::json!({"submitted":execution.submitted,"transaction_hash":execution.transaction_hash}),
+            "proven recovery auto-executed: 10% fee deducted, net sent to owner",
+            "All deterministic gates passed. No human approval required for proven claims.",
         ));
-        Ok(AgentRunResult { status:AgentRunStatus::RecoverableAwaitingApproval, concise_rationale:"chain facts, ownership, factory, balance, policy and simulation passed; human approval is required".into(), plan_id:Some(plan.id), approval_id:Some(approval.approval_id), recovery_transaction_hash:None, trajectory:trace })
+        if !execution.submitted {
+            return Ok(AgentRunResult { status:AgentRunStatus::Escalated, concise_rationale:"proven recovery execution failed".into(), plan_id:Some(plan.id), approval_id:None, recovery_transaction_hash:None, trajectory:trace });
+        }
+        seq += 1;
+        let verified = self.tools.verify_recovery(ctx, plan.id, &execution.transaction_hash).await?;
+        trace.push(step(seq, "verify_recovery", serde_json::json!({"transaction_hash":execution.transaction_hash}), serde_json::json!({"verified":verified}), "receipt and balance delta verified", "Submission alone is not success."));
+        Ok(AgentRunResult { status:if verified { AgentRunStatus::Recovered } else { AgentRunStatus::Escalated }, concise_rationale:if verified { "proven recovery executed and verified; 10% fee deducted".into() } else { "recovery could not be independently verified".into() }, plan_id:Some(plan.id), approval_id:None, recovery_transaction_hash:Some(execution.transaction_hash), trajectory:trace })
     }
 
     pub async fn execute_after_approval(

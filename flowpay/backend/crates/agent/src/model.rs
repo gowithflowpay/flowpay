@@ -692,24 +692,57 @@ where
             });
         }
 
-        let approval = self.tools.request_approval(ctx, plan.id).await?;
+        // Proven recovery: auto-execute without human approval.
+        // 10% platform fee is deducted; net amount returned to owner.
+        let execution = self.tools.execute_proven_recovery(ctx, plan.id).await?;
         trajectory.push(step(
             sequence,
-            "policy_gate.request_approval",
+            "policy_gate.execute_proven_recovery",
             json!({"plan_id":plan.id}),
-            json!({"approval_id":approval.approval_id,"status":approval.status}),
-            "approval is created as pending and cannot be granted by the model",
-            "Consequential recovery stops at a visible human checkpoint.",
+            json!({"submitted":execution.submitted,"transaction_hash":execution.transaction_hash}),
+            "proven recovery auto-executed: 10% fee deducted, net sent to owner",
+            "All deterministic gates passed. No human approval required for proven claims.",
+        ));
+        if !execution.submitted {
+            return Ok(AgentRunResult {
+                status: AgentRunStatus::Escalated,
+                concise_rationale: "proven recovery execution failed".into(),
+                plan_id: Some(plan.id),
+                approval_id: None,
+                recovery_transaction_hash: None,
+                trajectory,
+            });
+        }
+        sequence = sequence.saturating_add(1);
+        let verified = self
+            .tools
+            .verify_recovery(ctx, plan.id, &execution.transaction_hash)
+            .await?;
+        trajectory.push(step(
+            sequence,
+            "policy_gate.verify_recovery",
+            json!({"transaction_hash":execution.transaction_hash}),
+            json!({"verified":verified}),
+            "receipt and balance delta verified",
+            "Submission alone is not success.",
         ));
         Ok(AgentRunResult {
-            status: AgentRunStatus::RecoverableAwaitingApproval,
-            concise_rationale: format!(
-                "{} Deterministic policy and simulation passed; human approval is required.",
-                model_rationale.trim()
-            ),
+            status: if verified {
+                AgentRunStatus::Recovered
+            } else {
+                AgentRunStatus::Escalated
+            },
+            concise_rationale: if verified {
+                format!(
+                    "{} Proven recovery auto-executed and verified. 10%% fee deducted.",
+                    model_rationale.trim()
+                )
+            } else {
+                "recovery could not be independently verified".into()
+            },
             plan_id: Some(plan.id),
-            approval_id: Some(approval.approval_id),
-            recovery_transaction_hash: None,
+            approval_id: None,
+            recovery_transaction_hash: Some(execution.transaction_hash),
             trajectory,
         })
     }

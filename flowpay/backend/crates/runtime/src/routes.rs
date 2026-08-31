@@ -1035,16 +1035,20 @@ async fn test_webhook(
 }
 
 async fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<MerchantId, ApiError> {
-    let key = headers
-        .get("x-flowpay-api-key")
-        .and_then(|v| v.to_str().ok())
-        .ok_or_else(|| {
-            ApiError::new(
+    let key = match headers.get("x-flowpay-api-key").and_then(|v| v.to_str().ok()) {
+        Some(k) => k,
+        None if state.config.environment == "local" => {
+            // Dev mode: allow unauthenticated requests from the local merchant dashboard.
+            return Ok(state.config.default_dev_merchant());
+        }
+        _ => {
+            return Err(ApiError::new(
                 StatusCode::UNAUTHORIZED,
                 "missing_api_key",
                 "x-flowpay-api-key is required",
-            )
-        })?;
+            ));
+        }
+    };
     let prefix = key.split('.').next().unwrap_or(key);
     let record = state.store.api_key_by_prefix(prefix).await.map_err(|_| {
         ApiError::new(

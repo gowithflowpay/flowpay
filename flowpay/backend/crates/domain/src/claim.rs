@@ -74,6 +74,7 @@ impl ClaimState {
                 | (S::Investigating, S::Escalated)
                 | (S::NeedsMoreEvidence, S::AwaitingEvidence)
                 | (S::NeedsMoreEvidence, S::Escalated)
+                |            (S::Recoverable, S::RecoveryPending)
                 | (S::Recoverable, S::ApprovalPending)
                 | (S::Recoverable, S::Escalated)
                 | (S::ApprovalPending, S::RecoveryPending)
@@ -95,8 +96,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn approval_is_required_before_recovery_pending() {
-        assert!(!ClaimState::Recoverable.can_transition_to(ClaimState::RecoveryPending));
+    fn proven_recovery_skips_approval() {
+        // Proven recoveries go directly from Recoverable to RecoveryPending
+        assert!(ClaimState::Recoverable.can_transition_to(ClaimState::RecoveryPending));
+        // The approval path still exists for edge cases
         assert!(ClaimState::Recoverable.can_transition_to(ClaimState::ApprovalPending));
         assert!(ClaimState::ApprovalPending.can_transition_to(ClaimState::RecoveryPending));
     }

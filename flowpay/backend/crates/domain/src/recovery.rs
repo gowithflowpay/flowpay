@@ -1,5 +1,18 @@
 use crate::{AddressRef, AtomicAmount, ChainKey, ClaimId, PaymentId, RecoveryPlanId};
+use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
+
+/// Platform recovery fee in basis points (1000 = 10%).
+pub const RECOVERY_FEE_BPS: u64 = 1000;
+
+/// Compute the owner-receivable amount after deducting the platform fee.
+/// Returns `total * (10000 - RECOVERY_FEE_BPS) / 10000`.
+pub fn owner_receivable_amount(total: &AtomicAmount) -> AtomicAmount {
+    let owner_bps = BigUint::from(10000u64 - RECOVERY_FEE_BPS);
+    let divisor = BigUint::from(10000u64);
+    let net = total.inner() * owner_bps / divisor;
+    AtomicAmount::from_biguint(net)
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]

@@ -153,6 +153,17 @@ impl Config {
                 .collect(),
         })
     }
+
+    /// Returns a stable dev-mode merchant ID used when no API key is configured.
+    #[must_use]
+    pub fn default_dev_merchant(&self) -> flowpay_domain::MerchantId {
+        use uuid::Uuid;
+        // Deterministic UUID so it maps to the seeded dev merchant.
+        flowpay_domain::MerchantId(
+            Uuid::parse_str("11111111-1111-4111-8111-111111111111")
+                .expect("hardcoded dev merchant UUID"),
+        )
+    }
 }
 fn add_chain(
     chains: &mut HashMap<ChainKey, ChainConfig>,
