@@ -114,6 +114,8 @@ impl PaymentState {
                 | (S::RecoveryAvailable, S::Escalated)
                 | (S::RecoveryPending, S::Recovered)
                 | (S::RecoveryPending, S::Escalated)
+                | (S::Escalated, S::ClaimPending)
+                | (S::Escalated, S::RecoveryPending)
         )
     }
 
@@ -148,6 +150,12 @@ mod tests {
     fn cannot_skip_verification_and_settlement() {
         assert!(!PaymentState::Waiting.can_transition_to(PaymentState::Completed));
         assert!(!PaymentState::Detected.can_transition_to(PaymentState::Completed));
+    }
+
+    #[test]
+    fn escalated_payment_can_resume_an_authorized_recovery() {
+        assert!(PaymentState::Escalated.can_transition_to(PaymentState::ClaimPending));
+        assert!(PaymentState::Escalated.can_transition_to(PaymentState::RecoveryPending));
     }
 
     #[test]

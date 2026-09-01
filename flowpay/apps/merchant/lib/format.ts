@@ -17,15 +17,20 @@ export function moneyFromStableBalances(balances:any[]){
   const dollars=cents/100n,frac=(cents%100n).toString().padStart(2,"0");
   return `$${dollars.toString().replace(/\B(?=(\d{3})+(?!\d))/g,",")}.${frac}`;
 }
-export function networkAsset(chain:string){
-  const key=chain.toLowerCase().replace(/^custom:/,"");
+function chainKey(chain:unknown){
+  if(typeof chain==="string")return chain.toLowerCase().replace(/^custom:/,"");
+  if(chain&&typeof chain==="object"&&"custom" in chain)return String((chain as {custom:unknown}).custom).toLowerCase();
+  return "base";
+}
+export function networkAsset(chain:unknown){
+  const key=chainKey(chain);
   if(key==="bsc"||key==="bsc_testnet")return "/assets/bsc.svg";
   if(key==="ethereum_sepolia")return "/assets/ethereum.svg";
   if(key==="arbitrum_sepolia")return "/assets/arbitrum.svg";
   return "/assets/base.svg";
 }
-export function networkLabel(chain:string){
-  const key=chain.toLowerCase().replace(/^custom:/,"");
-  return ({base:"Base",bsc:"BNB Smart Chain",base_sepolia:"Base Sepolia",ethereum_sepolia:"Ethereum Sepolia",arbitrum_sepolia:"Arbitrum Sepolia",bsc_testnet:"BSC Testnet"} as Record<string,string>)[key]??chain;
+export function networkLabel(chain:unknown){
+  const key=chainKey(chain);
+  return ({base:"Base",bsc:"BNB Smart Chain",base_sepolia:"Base Sepolia",ethereum_sepolia:"Ethereum Sepolia",arbitrum_sepolia:"Arbitrum Sepolia",bsc_testnet:"BSC Testnet"} as Record<string,string>)[key]??key;
 }
 export function tokenAsset(symbol:string){return symbol.toUpperCase()==="USDT"?"/assets/usdt.svg":"/assets/usdc.svg";}

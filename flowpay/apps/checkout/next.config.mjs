@@ -8,7 +8,8 @@ loadEnvConfig(projectRoot);
 
 /** @type {import("next").NextConfig} */
 const nextConfig = {
-  outputFileTracingRoot: projectRoot,
+  outputFileTracingRoot: process.env.VERCEL ? process.cwd() : projectRoot,
+  assetPrefix: process.env.VERCEL ? "https://flowpay-checkout.vercel.app" : undefined,
 };
 
 export default nextConfig;

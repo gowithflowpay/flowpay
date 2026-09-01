@@ -33,10 +33,11 @@ pub struct Config {
     pub agent_max_steps: usize,
     pub agent_retry_budget: usize,
     pub rabbitmq_url: String,
-    pub provider_webhook_secret: Option<String>,
+    pub provider_webhook_secrets: Vec<String>,
     pub provider_webhook_path: String,
-    pub alchemy_api_key: Option<String>,
-    pub alchemy_networks: Vec<String>,
+    pub alchemy_notify_auth_token: Option<String>,
+    pub alchemy_notify_endpoint: String,
+    pub alchemy_webhook_ids: HashMap<ChainKey, String>,
 }
 
 impl Config {
@@ -132,21 +133,16 @@ impl Config {
             agent_retry_budget: parse_usize("FLOWPAY_AGENT_RETRY_BUDGET", 3)?.clamp(1, 10),
             rabbitmq_url: env::var("RABBITMQ_URL")
                 .unwrap_or_else(|_| "amqp://guest:guest@127.0.0.1:5672/%2f".into()),
-            provider_webhook_secret: env::var("FLOWPAY_PROVIDER_WEBHOOK_SECRET")
-                .ok()
-                .filter(|value| !value.trim().is_empty()),
+            provider_webhook_secrets: provider_webhook_secrets(),
             provider_webhook_path: env::var("FLOWPAY_PROVIDER_WEBHOOK_PATH")
                 .unwrap_or_else(|_| "/v1/providers/alchemy/webhook".into()),
-            alchemy_api_key: env::var("ALCHEMY_API_KEY")
+            alchemy_notify_auth_token: env::var("ALCHEMY_NOTIFY_AUTH_TOKEN")
                 .ok()
                 .filter(|value| !value.trim().is_empty()),
-            alchemy_networks: env::var("ALCHEMY_NETWORKS")
-                .unwrap_or_default()
-                .split(',')
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_owned)
-                .collect(),
+            alchemy_notify_endpoint: env::var("ALCHEMY_NOTIFY_ENDPOINT").unwrap_or_else(|_| {
+                "https://dashboard.alchemy.com/api/update-webhook-addresses".into()
+            }),
+            alchemy_webhook_ids: alchemy_webhook_ids(),
         })
     }
 
@@ -160,6 +156,66 @@ impl Config {
                 .expect("hardcoded dev merchant UUID"),
         )
     }
+}
+
+fn alchemy_webhook_ids() -> HashMap<ChainKey, String> {
+    [
+        (ChainKey::Base, "ALCHEMY_BASE_WEBHOOK_ID"),
+        (ChainKey::Bsc, "ALCHEMY_BSC_WEBHOOK_ID"),
+        (
+            ChainKey::Custom("ethereum_sepolia".into()),
+            "ALCHEMY_ETHEREUM_SEPOLIA_WEBHOOK_ID",
+        ),
+        (
+            ChainKey::Custom("base_sepolia".into()),
+            "ALCHEMY_BASE_SEPOLIA_WEBHOOK_ID",
+        ),
+        (
+            ChainKey::Custom("arbitrum_sepolia".into()),
+            "ALCHEMY_ARBITRUM_SEPOLIA_WEBHOOK_ID",
+        ),
+        (
+            ChainKey::Custom("optimism_sepolia".into()),
+            "ALCHEMY_OPTIMISM_SEPOLIA_WEBHOOK_ID",
+        ),
+        (
+            ChainKey::Custom("polygon_amoy".into()),
+            "ALCHEMY_POLYGON_AMOY_WEBHOOK_ID",
+        ),
+        (
+            ChainKey::Custom("bsc_testnet".into()),
+            "ALCHEMY_BSC_TESTNET_WEBHOOK_ID",
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(chain, key)| {
+        env::var(key)
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| (chain, value))
+    })
+    .collect()
+}
+
+fn provider_webhook_secrets() -> Vec<String> {
+    [
+        "FLOWPAY_PROVIDER_WEBHOOK_SECRET",
+        "ALCHEMY_ETHEREUM_SEPOLIA_WEBHOOK_SIGNING_KEY",
+        "ALCHEMY_BASE_SEPOLIA_WEBHOOK_SIGNING_KEY",
+        "ALCHEMY_ARBITRUM_SEPOLIA_WEBHOOK_SIGNING_KEY",
+        "ALCHEMY_OPTIMISM_SEPOLIA_WEBHOOK_SIGNING_KEY",
+        "ALCHEMY_POLYGON_AMOY_WEBHOOK_SIGNING_KEY",
+        "ALCHEMY_BSC_TESTNET_WEBHOOK_SIGNING_KEY",
+    ]
+    .into_iter()
+    .filter_map(|key| env::var(key).ok())
+    .filter(|value| !value.trim().is_empty())
+    .fold(Vec::new(), |mut secrets, secret| {
+        if !secrets.contains(&secret) {
+            secrets.push(secret);
+        }
+        secrets
+    })
 }
 fn add_chain(
     chains: &mut HashMap<ChainKey, ChainConfig>,

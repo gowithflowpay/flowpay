@@ -6,7 +6,7 @@ use flowpay_domain::{ChainKey, RecoveryPlanId, RecoveryPolicyDecision};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{collections::BTreeMap, str::FromStr};
+use std::{collections::BTreeMap, time::Duration};
 
 const INVESTIGATOR_INSTRUCTIONS: &str = r#"
 You are FlowPay's payment-claim investigator.
@@ -100,6 +100,7 @@ impl OpenAiResponsesClient {
             .http
             .post(&self.config.endpoint)
             .bearer_auth(&self.config.api_key)
+            .timeout(Duration::from_secs(120))
             .json(&body)
             .send()
             .await
@@ -144,6 +145,7 @@ impl OpenAiResponsesClient {
         let response = self
             .http
             .post(&self.config.endpoint)
+            .timeout(Duration::from_secs(120))
             .json(&json!({
                 "model":self.config.model,
                 "messages":messages,
@@ -217,6 +219,9 @@ impl OpenAiResponsesClient {
 struct EvidenceLedger {
     payment_loaded: bool,
     claim_loaded: bool,
+    claimed_chain: Option<ChainKey>,
+    claimed_transaction_hash: Option<String>,
+    checkout_address: Option<String>,
     wallet_verified: Option<bool>,
     wallet: Option<String>,
     tx_found: Option<bool>,
@@ -225,10 +230,10 @@ struct EvidenceLedger {
     tx_from: Option<String>,
     tx_to: Option<String>,
     tx_token: Option<String>,
+    tx_chain: Option<ChainKey>,
     cf_matches: Option<bool>,
     factory_verified: Option<bool>,
     balance_positive: Option<bool>,
-    unsupported_network: bool,
     last_errors: BTreeMap<String, String>,
 }
 
@@ -444,6 +449,7 @@ where
             "get_payment" => match self.tools.get_payment(ctx).await {
                 Ok(payment) => {
                     ledger.payment_loaded = true;
+                    ledger.checkout_address = Some(payment.checkout_address.value.clone());
                     (
                         json!({"ok":true,"payment":payment}),
                         "authoritative payment record loaded".into(),
@@ -456,6 +462,10 @@ where
             "get_claim" => match self.tools.get_claim(ctx).await {
                 Ok(claim) => {
                     ledger.claim_loaded = true;
+                    ledger.claimed_chain.clone_from(&claim.claimed_chain);
+                    ledger
+                        .claimed_transaction_hash
+                        .clone_from(&claim.transaction_hash);
                     (
                         json!({"ok":true,"claim":claim}),
                         "claim treated as untrusted investigation input".into(),
@@ -483,19 +493,22 @@ where
                 let Ok(args) = parsed else {
                     return bad_args("get_transaction", ledger);
                 };
-                let chain = match ChainKey::from_str(&args.chain) {
-                    Ok(chain) => chain,
-                    Err(_) => {
-                        ledger.unsupported_network = true;
-                        return structured_failure(
-                            "unsupported_network",
-                            "claimed network is not supported by the EVM investigation tools",
-                        );
-                    }
+                let _model_request = (&args.chain, &args.transaction_hash);
+                let Some(chain) = ledger.claimed_chain.clone() else {
+                    return structured_failure(
+                        "claim_facts_required",
+                        "load the claim before querying its transaction",
+                    );
+                };
+                let Some(transaction_hash) = ledger.claimed_transaction_hash.clone() else {
+                    return structured_failure(
+                        "claim_facts_required",
+                        "the claim has no transaction hash",
+                    );
                 };
                 match self
                     .tools
-                    .get_transaction(ctx, chain, &args.transaction_hash)
+                    .get_transaction(ctx, chain.clone(), &transaction_hash)
                     .await
                 {
                     Ok(tx) => {
@@ -505,6 +518,7 @@ where
                         ledger.tx_from = Some(tx.from.clone());
                         ledger.tx_to = Some(tx.to.clone());
                         ledger.tx_token.clone_from(&tx.token_contract);
+                        ledger.tx_chain = Some(tx.chain.clone());
                         (
                             json!({"ok":true,"transaction":tx}),
                             "transaction independently queried from configured chain adapter".into(),
@@ -527,19 +541,22 @@ where
                 let Ok(args) = parsed else {
                     return bad_args("verify_counterfactual_address", ledger);
                 };
-                let chain = match ChainKey::from_str(&args.chain) {
-                    Ok(chain) => chain,
-                    Err(_) => {
-                        ledger.unsupported_network = true;
-                        return structured_failure(
-                            "unsupported_network",
-                            "network is not configured for deterministic EVM address verification",
-                        );
-                    }
+                let _model_request = (&args.chain, &args.candidate_address);
+                let Some(chain) = ledger.tx_chain.clone() else {
+                    return structured_failure(
+                        "transaction_facts_required",
+                        "verify the transaction before checking the counterfactual address",
+                    );
+                };
+                let Some(candidate_address) = ledger.tx_to.clone() else {
+                    return structured_failure(
+                        "transaction_facts_required",
+                        "verified transaction has no destination address",
+                    );
                 };
                 match self
                     .tools
-                    .verify_counterfactual_address(ctx, chain, &args.candidate_address)
+                    .verify_counterfactual_address(ctx, chain, &candidate_address)
                     .await
                 {
                     Ok(result) => {
@@ -560,19 +577,28 @@ where
                 let Ok(args) = parsed else {
                     return bad_args("get_token_balance", ledger);
                 };
-                let chain = match ChainKey::from_str(&args.chain) {
-                    Ok(chain) => chain,
-                    Err(_) => {
-                        ledger.unsupported_network = true;
-                        return structured_failure(
-                            "unsupported_network",
-                            "network is not configured for balance verification",
-                        );
-                    }
+                let _model_request = (&args.chain, &args.token_contract, &args.address);
+                let Some(chain) = ledger.tx_chain.clone() else {
+                    return structured_failure(
+                        "transaction_facts_required",
+                        "verify the transaction before checking its token balance",
+                    );
+                };
+                let Some(token_contract) = ledger.tx_token.clone() else {
+                    return structured_failure(
+                        "transaction_facts_required",
+                        "verified transaction is not an ERC-20 transfer",
+                    );
+                };
+                let Some(address) = ledger.tx_to.clone() else {
+                    return structured_failure(
+                        "transaction_facts_required",
+                        "verified transaction has no destination address",
+                    );
                 };
                 match self
                     .tools
-                    .get_token_balance(ctx, chain, &args.token_contract, &args.address)
+                    .get_token_balance(ctx, chain, &token_contract, &address)
                     .await
                 {
                     Ok(balance) => {
@@ -1007,11 +1033,12 @@ mod tests {
             tx_from: Some("0x1111111111111111111111111111111111111111".into()),
             tx_to: Some("0x2222222222222222222222222222222222222222".into()),
             tx_token: Some("0x3333333333333333333333333333333333333333".into()),
+            tx_chain: Some(ChainKey::Base),
             cf_matches: Some(true),
             factory_verified: Some(true),
             balance_positive: Some(true),
-            unsupported_network: false,
             last_errors: BTreeMap::new(),
+            ..EvidenceLedger::default()
         }
     }
 

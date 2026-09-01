@@ -1,0 +1,7 @@
+version: "2"
+authtoken: 3IeUoGn2r1hEK0khqj5ZHJsyZOn_2kfFzCL78rkcWL4RPFYnM
+tunnels:
+    flowpay:
+        addr: 3001
+        proto: http
+        domain: sprite-spree-partner.ngrok-free.dev

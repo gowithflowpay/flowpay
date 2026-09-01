@@ -32,13 +32,15 @@ DO UPDATE SET secret_hash=EXCLUDED.secret_hash,revoked_at=NULL;
 
 DELETE FROM chain_assets
 WHERE chain IN ('base_sepolia','ethereum_sepolia','arbitrum_sepolia','bsc_testnet')
-  AND upper(symbol) = 'USDC';
+  AND upper(symbol) IN ('USDC','ETH');
 
 INSERT INTO chain_assets(chain,symbol,token_contract,decimals,purpose,enabled) VALUES
 ('base_sepolia','USDC',:'base_usdc',6,'BOTH',true),
+('base_sepolia','ETH',NULL,18,'BOTH',true),
 ('ethereum_sepolia','USDC',:'eth_usdc',6,'BOTH',true),
+('ethereum_sepolia','ETH',NULL,18,'BOTH',true),
 ('arbitrum_sepolia','USDC',:'arb_usdc',6,'BOTH',true),
 ('bsc_testnet','USDC',:'bsc_usdc',6,'BOTH',true)
 ON CONFLICT DO NOTHING;
 SQL
-printf '%s\n' 'Testnet USDC assets seeded.'
+printf '%s\n' 'Testnet USDC and native ETH assets seeded.'

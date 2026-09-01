@@ -1,4 +1,11 @@
 import "server-only";
+import path from "node:path";
+import { loadEnvConfig } from "@next/env";
+
+// Route handlers execute in their own runtime and do not inherit variables
+// loaded while Next evaluates next.config.mjs. Load the repository environment
+// in the server-only API module so hosted pages and browser polling agree.
+loadEnvConfig(path.resolve(process.cwd(), "../.."));
 
 export async function api(path:string,init:RequestInit={}){
   const base=(process.env.FLOWPAY_API_URL??"http://127.0.0.1:8080").replace(/\/$/,"");

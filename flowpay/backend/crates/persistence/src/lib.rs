@@ -522,7 +522,7 @@ impl PgStore {
         &self,
         chain: &ChainKey,
     ) -> Result<Vec<PaymentId>, StoreError> {
-        let rows=sqlx::query_scalar::<_,Uuid>("SELECT DISTINCT p.id FROM payments p JOIN checkout_addresses c ON c.payment_id=p.id AND c.chain=$1 WHERE p.state IN ('WAITING','DETECTED','CONFIRMING','PARTIALLY_PAID','OVERPAID','WRONG_ASSET','CONFIRMED','SETTLING') ORDER BY p.created_at").bind(chain.to_string()).fetch_all(&self.pool).await?;
+        let rows=sqlx::query_scalar::<_,Uuid>("SELECT p.id FROM payments p JOIN checkout_addresses c ON c.payment_id=p.id AND c.chain=$1 WHERE p.state IN ('WAITING','DETECTED','CONFIRMING','PARTIALLY_PAID','OVERPAID','WRONG_ASSET','CONFIRMED','SETTLING') ORDER BY p.created_at").bind(chain.to_string()).fetch_all(&self.pool).await?;
         Ok(rows.into_iter().map(PaymentId).collect())
     }
 

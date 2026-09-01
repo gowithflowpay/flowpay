@@ -4,15 +4,14 @@ set -euo pipefail
 BSC_OVERRIDE="${FLOWPAY_BSC_RPC_OVERRIDE:-}"
 ENV_OVERRIDE="${FLOWPAY_ENV_OVERRIDE:-}"
 set -a
+for metadata in runtime/base-sepolia.env runtime/ethereum-sepolia.env runtime/arbitrum-sepolia.env runtime/bsc-testnet.env; do
+  [[ -f "$metadata" ]] && source "$metadata"
+done
 [[ -f .env ]] && source .env
 [[ -n "$ENV_OVERRIDE" ]] && FLOWPAY_ENV="$ENV_OVERRIDE"
 if [[ "${FLOWPAY_ENV:-local}" == "local" ]]; then
   [[ -f runtime/local.env ]] || { echo "runtime/local.env missing; run scripts/reset-local.sh first" >&2; exit 1; }
   source runtime/local.env
-elif [[ "${FLOWPAY_ENV:-local}" == "testnet" ]]; then
-  for metadata in runtime/base-sepolia.env runtime/ethereum-sepolia.env runtime/arbitrum-sepolia.env runtime/bsc-testnet.env; do
-    [[ -f "$metadata" ]] && source "$metadata"
-  done
 fi
 set +a
 [[ -n "$BSC_OVERRIDE" ]] && export BSC_RPC_URL="$BSC_OVERRIDE"

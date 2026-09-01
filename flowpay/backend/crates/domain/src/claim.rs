@@ -81,6 +81,8 @@ impl ClaimState {
                 | (S::ApprovalPending, S::Escalated)
                 | (S::RecoveryPending, S::Recovered)
                 | (S::RecoveryPending, S::Escalated)
+                | (S::Escalated, S::Investigating)
+                | (S::Escalated, S::RecoveryPending)
         )
     }
 
@@ -102,5 +104,11 @@ mod tests {
         // The approval path still exists for edge cases
         assert!(ClaimState::Recoverable.can_transition_to(ClaimState::ApprovalPending));
         assert!(ClaimState::ApprovalPending.can_transition_to(ClaimState::RecoveryPending));
+    }
+
+    #[test]
+    fn escalated_claim_can_be_retried_after_operator_fix() {
+        assert!(ClaimState::Escalated.can_transition_to(ClaimState::Investigating));
+        assert!(ClaimState::Escalated.can_transition_to(ClaimState::RecoveryPending));
     }
 }

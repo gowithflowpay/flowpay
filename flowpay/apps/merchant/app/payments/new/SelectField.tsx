@@ -6,7 +6,7 @@ import {CheckIcon} from "../../components/Icons";
 
 type Option={value:string;label:string;detail:string;icon:string};
 
-export function SelectField({name,label,options}:{name:string;label:string;options:Option[]}){
+export function SelectField({name,label,options,onValueChange}:{name:string;label:string;options:Option[];onValueChange?:(option:Option)=>void}){
   const [value,setValue]=useState(options[0].value);
   const [open,setOpen]=useState(false);
   const root=useRef<HTMLDivElement>(null);
@@ -27,7 +27,7 @@ export function SelectField({name,label,options}:{name:string;label:string;optio
       <svg className="select-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><path d="m7 10 5 5 5-5"/></svg>
     </button>
     {open?<div className="select-menu" role="listbox" aria-label={label}>
-      {options.map(option=><button type="button" role="option" aria-selected={option.value===value} className="select-option" key={option.value} onClick={()=>{setValue(option.value);setOpen(false)}}>
+      {options.map(option=><button type="button" role="option" aria-selected={option.value===value} className="select-option" key={option.value} onClick={()=>{setValue(option.value);setOpen(false);onValueChange?.(option)}}>
         <Image src={option.icon} width={30} height={30} alt=""/>
         <span><strong>{option.label}</strong><small>{option.detail}</small></span>
         {option.value===value?<CheckIcon/>:null}

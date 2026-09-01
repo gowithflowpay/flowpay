@@ -156,6 +156,14 @@ make dev
 
 The bootstrap starts both Anvil chains, deploys contracts, applies migrations, and seeds local data. `make dev` starts the API, worker, event relay, merchant UI, and checkout UI.
 
+To start only the complete backend (API, worker, and event relay) with one command:
+
+```bash
+make backend
+```
+
+PostgreSQL, RabbitMQ, and Kafka must already be running as native services. On the first local run, the command also bootstraps the two Anvil chains, contracts, migrations, and seed data. Logs are written under `runtime/`; Ctrl-C stops all three backend processes.
+
 Local endpoints:
 
 ```text

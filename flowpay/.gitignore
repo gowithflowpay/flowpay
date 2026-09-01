@@ -22,3 +22,8 @@ contracts/out
 *-local-*.env
 *-before-*.env
 ~/
+
+# Secrets & screenshots
+alchemy-webhook.txt
+deployer-pk.txt
+*.png

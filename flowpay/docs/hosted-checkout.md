@@ -7,7 +7,7 @@ The customer-facing FlowPay app lives in `apps/checkout` and runs independently 
 `POST /v1/payments` returns a `checkout_url` such as:
 
 ```text
-http://127.0.0.1:3001/pay/pay_<id>
+https://pixuno.xyz/pay/pay_<id>
 ```
 
 The checkout route never fabricates payment details. It loads the payment through the FlowPay API and renders:

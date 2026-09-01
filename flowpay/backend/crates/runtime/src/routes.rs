@@ -27,6 +27,7 @@ use uuid::Uuid;
 
 pub fn router(state: AppState) -> Router {
     Router::new()
+        .route("/", get(root))
         .route("/health", get(health))
         .route("/v1/providers/alchemy/webhook", post(alchemy_webhook))
         .route("/v1/payments", get(list_payments).post(create_payment))
@@ -54,22 +55,27 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
+async fn root() -> Json<Value> {
+    Json(json!({
+        "ok": true,
+        "service": "flowpay-api-server",
+        "health": "/health",
+        "api": "/v1"
+    }))
+}
+
 async fn alchemy_webhook(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: String,
 ) -> Result<StatusCode, ApiError> {
-    let secret = state
-        .config
-        .provider_webhook_secret
-        .as_deref()
-        .ok_or_else(|| {
-            ApiError::new(
-                StatusCode::NOT_IMPLEMENTED,
-                "provider_webhook_not_configured",
-                "provider webhook secret is not configured",
-            )
-        })?;
+    if state.config.provider_webhook_secrets.is_empty() {
+        return Err(ApiError::new(
+            StatusCode::NOT_IMPLEMENTED,
+            "provider_webhook_not_configured",
+            "provider webhook signing keys are not configured",
+        ));
+    }
     let signature = headers
         .get("x-alchemy-signature")
         .and_then(|value| value.to_str().ok())
@@ -80,18 +86,11 @@ async fn alchemy_webhook(
                 "missing Alchemy signature",
             )
         })?;
-    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).map_err(internal)?;
-    mac.update(body.as_bytes());
-    let expected = hex::encode(mac.finalize().into_bytes());
-    let supplied = signature.trim_start_matches("0x");
-    if expected.len() != supplied.len()
-        || !expected
-            .as_bytes()
-            .iter()
-            .zip(supplied.as_bytes())
-            .fold(0_u8, |diff, (left, right)| diff | (left ^ right))
-            .eq(&0)
-    {
+    if !valid_alchemy_signature(
+        &state.config.provider_webhook_secrets,
+        body.as_bytes(),
+        signature,
+    ) {
         return Err(ApiError::new(
             StatusCode::UNAUTHORIZED,
             "invalid_provider_signature",
@@ -101,19 +100,14 @@ async fn alchemy_webhook(
     let payload: Value = serde_json::from_str(&body)
         .map_err(|_| ApiError::bad("invalid_provider_payload", "provider payload must be JSON"))?;
     let event_id = payload
-        .get("webhookId")
-        .or_else(|| payload.get("id"))
+        .get("id")
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            ApiError::bad(
-                "invalid_provider_payload",
-                "Alchemy payload has no event identifier",
-            )
-        })?;
+        .map(str::to_owned)
+        .unwrap_or_else(|| format!("sha256:{}", hex::encode(Sha256::digest(body.as_bytes()))));
     let mut tx = state.store.pool().begin().await.map_err(db)?;
     let inserted = sqlx::query("INSERT INTO provider_webhook_events(provider,event_id,payload) VALUES('alchemy',$1,$2) ON CONFLICT DO NOTHING")
-        .bind(event_id)
+        .bind(&event_id)
         .bind(&payload)
         .execute(&mut *tx)
         .await
@@ -142,7 +136,23 @@ async fn alchemy_webhook(
         .map_err(internal)?;
     }
     tx.commit().await.map_err(db)?;
+    crate::workers::process_alchemy_webhook(&state, &payload)
+        .await
+        .map_err(internal)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+fn valid_alchemy_signature(secrets: &[String], body: &[u8], signature: &str) -> bool {
+    let Ok(supplied) = hex::decode(signature.trim_start_matches("0x")) else {
+        return false;
+    };
+    secrets.iter().any(|secret| {
+        let Ok(mut mac) = Hmac::<Sha256>::new_from_slice(secret.as_bytes()) else {
+            return false;
+        };
+        mac.update(body);
+        mac.verify_slice(&supplied).is_ok()
+    })
 }
 
 async fn health(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
@@ -347,36 +357,32 @@ async fn register_checkout_with_alchemy(
     if state.config.environment.eq_ignore_ascii_case("local") {
         return Ok(());
     }
-    let Some(token) = state.config.alchemy_notify_auth_token.as_deref() else {
-        tracing::debug!("ALCHEMY_NOTIFY_AUTH_TOKEN not set; skipping Alchemy registration");
-        return Ok(());
-    };
+    let token = state
+        .config
+        .alchemy_notify_auth_token
+        .as_deref()
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "alchemy_not_configured",
+                "ALCHEMY_NOTIFY_AUTH_TOKEN is required outside local mode",
+            )
+        })?;
 
-    // Networks to monitor for checkout address activity.
-    let monitored_networks: Vec<(&str, &str)> = vec![
-        ("BASE_SEPOLIA", "base_sepolia"),
-        ("ETHEREUM_SEPOLIA", "ethereum_sepolia"),
+    let monitored_networks = [
+        ("BASE_SEPOLIA", ChainKey::Custom("base_sepolia".into())),
+        ("ETH_SEPOLIA", ChainKey::Custom("ethereum_sepolia".into())),
     ];
 
-    for (env_suffix, chain_name) in &monitored_networks {
-        // 1. Use pre-configured webhook ID if available.
-        let webhook_id = state.config.alchemy_webhook_ids.get(
-            &ChainKey::Custom((*chain_name).into()),
-        );
+    for (alchemy_network, chain) in monitored_networks
+        .iter()
+        .filter(|(_, chain)| state.chains.contains_key(chain))
+    {
+        let webhook_id = state.config.alchemy_webhook_ids.get(chain);
 
         let resolved_id = match webhook_id {
             Some(id) => id.clone(),
-            None => {
-                // 2. Auto-discover: list existing webhooks and find an ADDRESS_ACTIVITY one
-                //    for this network, or create one.
-                match auto_discover_or_create_webhook(state, token, env_suffix).await {
-                    Ok(id) => id,
-                    Err(error) => {
-                        tracing::warn!(error=?error, %chain_name, "Alchemy webhook auto-discovery failed; skipping");
-                        continue;
-                    }
-                }
-            }
+            None => discover_alchemy_webhook(state, token, alchemy_network).await?,
         };
 
         let response = state
@@ -394,22 +400,32 @@ async fn register_checkout_with_alchemy(
 
         match response {
             Ok(resp) if resp.status().is_success() => {
-                tracing::info!(%chain_name, webhook_id=%resolved_id, %checkout_address, "Alchemy checkout address registered");
+                tracing::info!(chain=%chain, webhook_id=%resolved_id, %checkout_address, "Alchemy checkout address registered");
             }
             Ok(resp) => {
-                tracing::warn!(status=%resp.status(), %chain_name, webhook_id=%resolved_id, "Alchemy rejected checkout registration");
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                tracing::error!(%status, %body, chain=%chain, webhook_id=%resolved_id, "Alchemy rejected checkout registration");
+                return Err(ApiError::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "alchemy_checkout_registration_failed",
+                    format!("could not register checkout address on {chain}"),
+                ));
             }
             Err(error) => {
-                tracing::warn!(%error, %chain_name, "Alchemy registration request failed");
+                tracing::error!(%error, chain=%chain, "Alchemy registration request failed");
+                return Err(ApiError::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "alchemy_api_unavailable",
+                    format!("could not register checkout address on {chain}"),
+                ));
             }
         }
     }
     Ok(())
 }
 
-/// Auto-discover an existing Alchemy ADDRESS_ACTIVITY webhook for the given network,
-/// or create one if none exists. Returns the webhook ID.
-async fn auto_discover_or_create_webhook(
+async fn discover_alchemy_webhook(
     state: &AppState,
     token: &str,
     network_env_suffix: &str,
@@ -419,7 +435,7 @@ async fn auto_discover_or_create_webhook(
     // List existing webhooks.
     let list_response = state
         .http
-        .get(format!("{}/get-webhooks", alchemy_api_base))
+        .get(format!("{}/team-webhooks", alchemy_api_base))
         .timeout(StdDuration::from_secs(10))
         .header("X-Alchemy-Token", token)
         .send()
@@ -437,9 +453,12 @@ async fn auto_discover_or_create_webhook(
         let body: Value = list_response.json().await.unwrap_or_default();
         if let Some(webhooks) = body.get("data").and_then(Value::as_array) {
             for webhook in webhooks {
-                let w_type = webhook.get("type").and_then(Value::as_str).unwrap_or("");
+                let w_type = webhook
+                    .get("webhook_type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
                 let w_network = webhook.get("network").and_then(Value::as_str).unwrap_or("");
-                if w_type == "ADDRESS_ACTIVITY"
+                if w_type.eq_ignore_ascii_case("ADDRESS_ACTIVITY")
                     && w_network.eq_ignore_ascii_case(network_env_suffix)
                 {
                     if let Some(id) = webhook.get("id").and_then(Value::as_str) {
@@ -451,64 +470,11 @@ async fn auto_discover_or_create_webhook(
         }
     }
 
-    // No existing webhook found; create one.
-    let create_response = state
-        .http
-        .post(format!("{}/create-webhook", alchemy_api_base))
-        .timeout(StdDuration::from_secs(10))
-        .header("X-Alchemy-Token", token)
-        .json(&json!({
-            "type": "ADDRESS_ACTIVITY",
-            "network": network_env_suffix,
-            "name": format!("FlowPay checkout monitor ({})", network_env_suffix),
-            "addresses_to_add": [],
-        }))
-        .send()
-        .await
-        .map_err(|error| {
-            tracing::error!(%error, "Alchemy webhook create request failed");
-            ApiError::new(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "alchemy_api_unavailable",
-                "could not create Alchemy webhook",
-            )
-        })?;
-
-    if !create_response.status().is_success() {
-        let status = create_response.status();
-        let body = create_response.text().await.unwrap_or_default();
-        tracing::error!(%status, body=%body, %network_env_suffix, "Alchemy webhook creation rejected");
-        return Err(ApiError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "alchemy_webhook_create_failed",
-            format!("failed to create Alchemy webhook for {}", network_env_suffix),
-        ));
-    }
-
-    let body: Value = create_response.json().await.map_err(|error| {
-        tracing::error!(%error, "Alchemy create webhook response not JSON");
-        ApiError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "alchemy_api_error",
-            "unexpected Alchemy response",
-        )
-    })?;
-
-    let id = body
-        .get("data")
-        .and_then(|d| d.get("id"))
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            tracing::error!(body=%body, %network_env_suffix, "Alchemy create webhook response missing id");
-            ApiError::new(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "alchemy_api_error",
-                "Alchemy webhook creation returned no ID",
-            )
-        })?;
-
-    tracing::info!(webhook_id=%id, %network_env_suffix, "Created new Alchemy webhook");
-    Ok(id.to_owned())
+    Err(ApiError::new(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "alchemy_webhook_not_found",
+        format!("no Address Activity webhook exists for {network_env_suffix}"),
+    ))
 }
 
 async fn get_payment(
@@ -1549,6 +1515,7 @@ async fn list_claims(
 #[derive(Debug, Deserialize)]
 struct CreateApiKeyRequest {
     name: String,
+    environment: Option<String>,
 }
 async fn list_api_keys(
     State(state): State<AppState>,
@@ -1557,7 +1524,7 @@ async fn list_api_keys(
     let merchant = authenticate(&state, &headers).await?;
     let rows=sqlx::query("SELECT id,label,public_prefix,created_at,last_used_at,revoked_at FROM api_keys WHERE merchant_id=$1 ORDER BY created_at DESC").bind(merchant.0).fetch_all(state.store.pool()).await.map_err(db)?;
     Ok(Json(
-        json!({"data":rows.iter().map(|r|json!({"id":format!("key_{}",r.try_get::<Uuid,_>("id").unwrap_or_default().simple()),"name":r.try_get::<String,_>("label").unwrap_or_default(),"prefix":r.try_get::<String,_>("public_prefix").unwrap_or_default(),"last_used_at":r.try_get::<Option<OffsetDateTime>,_>("last_used_at").ok().flatten().map(|v|v.to_string()),"revoked":r.try_get::<Option<OffsetDateTime>,_>("revoked_at").ok().flatten().is_some()})).collect::<Vec<_>>() }),
+        json!({"data":rows.iter().map(|r|json!({"id":format!("key_{}",r.try_get::<Uuid,_>("id").unwrap_or_default().simple()),"name":r.try_get::<String,_>("label").unwrap_or_default(),"prefix":r.try_get::<String,_>("public_prefix").unwrap_or_default(),"permissions":["payments:read","payments:write","webhooks:read","webhooks:write"],"created_at":r.try_get::<OffsetDateTime,_>("created_at").ok().map(|v|v.unix_timestamp()*1000),"last_used_at":r.try_get::<Option<OffsetDateTime>,_>("last_used_at").ok().flatten().map(|v|v.unix_timestamp()*1000),"revoked":r.try_get::<Option<OffsetDateTime>,_>("revoked_at").ok().flatten().is_some()})).collect::<Vec<_>>() }),
     ))
 }
 async fn create_api_key(
@@ -1572,13 +1539,13 @@ async fn create_api_key(
             "key name must be 1-80 characters",
         ));
     }
+    let environment = req.environment.as_deref().unwrap_or(if state.config.environment == "local" { "test" } else { "live" });
+    if !matches!(environment, "live" | "test") {
+        return Err(ApiError::bad("invalid_environment", "environment must be live or test"));
+    }
     let prefix = format!(
         "fp_{}_{}",
-        if state.config.environment == "local" {
-            "test"
-        } else {
-            "live"
-        },
+        environment,
         &Uuid::now_v7().simple().to_string()[..10]
     );
     let secret = format!("{}{}", Uuid::now_v7().simple(), Uuid::now_v7().simple());
@@ -1590,7 +1557,7 @@ async fn create_api_key(
     Ok((
         StatusCode::CREATED,
         Json(
-            json!({"id":format!("key_{}",id.simple()),"api_key":full,"warning":"This secret is shown once."}),
+            json!({"id":format!("key_{}",id.simple()),"public_key":prefix,"secret_key":secret,"api_key":full,"warning":"The secret key and complete API credential are shown once."}),
         ),
     ))
 }
