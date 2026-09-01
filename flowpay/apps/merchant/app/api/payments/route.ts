@@ -15,7 +15,7 @@ export async function POST(request:Request){
       }),
     });
     if(request.headers.get("accept")?.includes("application/json"))return NextResponse.json(result,{status:201});
-    return NextResponse.redirect(new URL(`/payments/${encodeURIComponent(result.id)}`,request.url),303);
+    return NextResponse.redirect(new URL(`/payments?created=${encodeURIComponent(result.id)}`,request.url),303);
   }catch(error){
     const message=error instanceof Error?error.message:"Unable to create payment";
     return NextResponse.json({error:{message}},{status:502});

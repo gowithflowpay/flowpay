@@ -77,7 +77,7 @@ trap cleanup EXIT INT TERM
 (cd apps/checkout && npm run dev) >runtime/checkout.log 2>&1 & pids+=("$!")
 
 if command -v ngrok >/dev/null && [[ "${FLOWPAY_NGROK_ENABLED:-true}" == "true" ]]; then
-  ngrok http 8080 --log stdout >runtime/ngrok.log 2>&1 & pids+=("$!")
+  ngrok start --config="$ROOT/ngrok.yml" flowpay --log stdout >runtime/ngrok.log 2>&1 & pids+=("$!")
 fi
 
 for _ in {1..60}; do

@@ -17,7 +17,6 @@ const nextConfig = {
       {source:"/claim/:path*",destination:`${checkoutBase}/claim/:path*`},
       {source:"/api/payment/:path*",destination:`${checkoutBase}/api/payment/:path*`},
       {source:"/api/claims/:path*",destination:`${checkoutBase}/api/claims/:path*`},
-      {source:"/v1/providers/alchemy/webhook",destination:`${checkoutBase}/v1/providers/alchemy/webhook`},
     ];
   },
 };

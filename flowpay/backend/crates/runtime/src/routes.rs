@@ -46,6 +46,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/claims/{id}/fund", post(fund_claim))
         .route("/v1/claims/{id}/approve", post(approve_claim))
         .route("/v1/webhooks", get(list_webhooks).post(create_webhook))
+        .route("/v1/webhooks/deliveries", get(list_webhook_deliveries))
         .route("/v1/webhooks/test", post(test_webhook))
         .route("/v1/api-keys", get(list_api_keys).post(create_api_key))
         .route("/v1/api-keys/{id}/revoke", post(revoke_api_key))
@@ -136,9 +137,6 @@ async fn alchemy_webhook(
         .map_err(internal)?;
     }
     tx.commit().await.map_err(db)?;
-    crate::workers::process_alchemy_webhook(&state, &payload)
-        .await
-        .map_err(internal)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1176,6 +1174,34 @@ async fn list_webhooks(
     let data=rows.into_iter().map(|r|json!({"id":format!("wh_{}",r.try_get::<Uuid,_>("id").unwrap_or_default().simple()),"url":r.try_get::<String,_>("url").unwrap_or_default(),"enabled":r.try_get::<bool,_>("enabled").unwrap_or(false),"events":r.try_get::<Vec<String>,_>("subscribed_events").unwrap_or_default()})).collect::<Vec<_>>();
     Ok(Json(json!({"data":data})))
 }
+
+async fn list_webhook_deliveries(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let merchant = authenticate(&state, &headers).await?;
+    let rows = sqlx::query(
+        "SELECT d.id,d.response_status,d.attempted_at,e.public_id AS event_id,e.event_type,e.aggregate_public_id,w.url,p.expected_amount_atomic::text AS amount_atomic,p.expected_asset_decimals,p.expected_asset_symbol,p.expected_chain FROM webhook_deliveries d JOIN webhook_events e ON e.id=d.webhook_event_id JOIN webhook_endpoints w ON w.id=d.webhook_endpoint_id LEFT JOIN payments p ON e.aggregate_type='PAYMENT' AND p.public_id=e.aggregate_public_id AND p.merchant_id=e.merchant_id WHERE e.merchant_id=$1 AND d.status='DELIVERED' AND e.event_type='payment.completed' ORDER BY d.attempted_at DESC NULLS LAST LIMIT 20"
+    )
+    .bind(merchant.0)
+    .fetch_all(state.store.pool())
+    .await
+    .map_err(db)?;
+    let data = rows.into_iter().map(|row| json!({
+        "id": format!("wd_{}", row.try_get::<Uuid,_>("id").unwrap_or_default().simple()),
+        "event_id": row.try_get::<String,_>("event_id").unwrap_or_default(),
+        "event": row.try_get::<String,_>("event_type").unwrap_or_default(),
+        "payment_id": row.try_get::<String,_>("aggregate_public_id").unwrap_or_default(),
+        "endpoint": row.try_get::<String,_>("url").unwrap_or_default(),
+        "response_status": row.try_get::<Option<i32>,_>("response_status").unwrap_or(None),
+        "delivered_at": row.try_get::<Option<OffsetDateTime>,_>("attempted_at").unwrap_or(None).map(|value| value.to_string()),
+        "amount_atomic": row.try_get::<Option<String>,_>("amount_atomic").unwrap_or(None),
+        "asset_decimals": row.try_get::<Option<i16>,_>("expected_asset_decimals").unwrap_or(None),
+        "asset": row.try_get::<Option<String>,_>("expected_asset_symbol").unwrap_or(None),
+        "chain": row.try_get::<Option<String>,_>("expected_chain").unwrap_or(None),
+    })).collect::<Vec<_>>();
+    Ok(Json(json!({"data": data})))
+}
 fn validate_webhook_url(value: &str, environment: &str) -> Result<(), ApiError> {
     let parsed = url::Url::parse(value)
         .map_err(|_| ApiError::bad("invalid_webhook_url", "webhook URL is invalid"))?;
@@ -1229,10 +1255,6 @@ async fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<MerchantI
         .and_then(|v| v.to_str().ok())
     {
         Some(k) => k,
-        None if state.config.environment == "local" => {
-            // Dev mode: allow unauthenticated requests from the local merchant dashboard.
-            return Ok(state.config.default_dev_merchant());
-        }
         _ => {
             return Err(ApiError::new(
                 StatusCode::UNAUTHORIZED,

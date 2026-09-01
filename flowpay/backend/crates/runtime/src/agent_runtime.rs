@@ -373,7 +373,7 @@ impl InvestigationTools for DatabaseAgentTools {
                 .map_err(|e| ToolError::Permanent(e.to_string()))?,
             require_self_custody_signature: true,
             require_simulation: true,
-            require_human_approval: false,
+            require_human_approval: true,
         };
         let receiver_deployment_required = !runtime
             .adapter
@@ -722,10 +722,6 @@ impl ControlledRecoveryTools for DatabaseAgentTools {
                 "approval plan hash no longer matches current plan".into(),
             ));
         }
-        let consumed=sqlx::query("UPDATE approvals SET status='CONSUMED',consumed_at=now() WHERE id=$1 AND status='APPROVED'").bind(approval_id.0).execute(self.state.store.pool()).await.map_err(db_err)?.rows_affected();
-        if consumed != 1 {
-            return Err(ToolError::NotAuthorized);
-        }
         let runtime = self
             .state
             .chains
@@ -785,7 +781,13 @@ impl ControlledRecoveryTools for DatabaseAgentTools {
                 "local-unlocked-operator",
             )
         };
-        sqlx::query("INSERT INTO recovery_executions(recovery_plan_id,approval_id,plan_hash,transaction_class,chain,signer_key_ref,tx_hash,state) VALUES($1,$2,$3,'RECOVER_ERC20',$4,$5,$6,'SUBMITTED')").bind(plan_id.0).bind(approval_id.0).bind(&plan_hash).bind(plan.source_chain.to_string()).bind(signer_key_ref).bind(&tx_hash).execute(self.state.store.pool()).await.map_err(db_err)?;
+        let mut db_tx = self.state.store.pool().begin().await.map_err(db_err)?;
+        let consumed=sqlx::query("UPDATE approvals SET status='CONSUMED',consumed_at=now() WHERE id=$1 AND status='APPROVED'").bind(approval_id.0).execute(&mut *db_tx).await.map_err(db_err)?.rows_affected();
+        if consumed != 1 {
+            return Err(ToolError::NotAuthorized);
+        }
+        sqlx::query("INSERT INTO recovery_executions(recovery_plan_id,approval_id,plan_hash,transaction_class,chain,signer_key_ref,tx_hash,state) VALUES($1,$2,$3,'RECOVER_ERC20',$4,$5,$6,'SUBMITTED')").bind(plan_id.0).bind(approval_id.0).bind(&plan_hash).bind(plan.source_chain.to_string()).bind(signer_key_ref).bind(&tx_hash).execute(&mut *db_tx).await.map_err(db_err)?;
+        db_tx.commit().await.map_err(db_err)?;
         self.state
             .store
             .set_claim_state(
