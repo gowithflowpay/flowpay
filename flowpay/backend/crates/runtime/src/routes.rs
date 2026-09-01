@@ -1,4 +1,4 @@
-use crate::{error::ApiError, state::AppState};
+use crate::{config::Config, error::ApiError, state::AppState};
 use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
@@ -27,7 +27,6 @@ use uuid::Uuid;
 
 pub fn router(state: AppState) -> Router {
     Router::new()
-        .route("/", get(root))
         .route("/health", get(health))
         .route("/v1/providers/alchemy/webhook", post(alchemy_webhook))
         .route("/v1/payments", get(list_payments).post(create_payment))
@@ -46,7 +45,6 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/claims/{id}/fund", post(fund_claim))
         .route("/v1/claims/{id}/approve", post(approve_claim))
         .route("/v1/webhooks", get(list_webhooks).post(create_webhook))
-        .route("/v1/webhooks/deliveries", get(list_webhook_deliveries))
         .route("/v1/webhooks/test", post(test_webhook))
         .route("/v1/api-keys", get(list_api_keys).post(create_api_key))
         .route("/v1/api-keys/{id}/revoke", post(revoke_api_key))
@@ -56,25 +54,17 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
-async fn root() -> Json<Value> {
-    Json(json!({
-        "ok": true,
-        "service": "flowpay-api-server",
-        "health": "/health",
-        "api": "/v1"
-    }))
-}
-
 async fn alchemy_webhook(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: String,
 ) -> Result<StatusCode, ApiError> {
-    if state.config.provider_webhook_secrets.is_empty() {
+    let secrets = &state.config.provider_webhook_secrets;
+    if secrets.is_empty() {
         return Err(ApiError::new(
             StatusCode::NOT_IMPLEMENTED,
             "provider_webhook_not_configured",
-            "provider webhook signing keys are not configured",
+            "provider webhook secret is not configured",
         ));
     }
     let signature = headers
@@ -87,11 +77,22 @@ async fn alchemy_webhook(
                 "missing Alchemy signature",
             )
         })?;
-    if !valid_alchemy_signature(
-        &state.config.provider_webhook_secrets,
-        body.as_bytes(),
-        signature,
-    ) {
+    let supplied = signature.trim_start_matches("0x");
+    let valid_signature = secrets.iter().any(|secret| {
+        let Ok(mut mac) = Hmac::<Sha256>::new_from_slice(secret.as_bytes()) else {
+            return false;
+        };
+        mac.update(body.as_bytes());
+        let expected = hex::encode(mac.finalize().into_bytes());
+        expected.len() == supplied.len()
+            && expected
+                .as_bytes()
+                .iter()
+                .zip(supplied.as_bytes())
+                .fold(0_u8, |diff, (left, right)| diff | (left ^ right))
+                == 0
+    });
+    if !valid_signature {
         return Err(ApiError::new(
             StatusCode::UNAUTHORIZED,
             "invalid_provider_signature",
@@ -101,14 +102,19 @@ async fn alchemy_webhook(
     let payload: Value = serde_json::from_str(&body)
         .map_err(|_| ApiError::bad("invalid_provider_payload", "provider payload must be JSON"))?;
     let event_id = payload
-        .get("id")
+        .get("webhookId")
+        .or_else(|| payload.get("id"))
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .unwrap_or_else(|| format!("sha256:{}", hex::encode(Sha256::digest(body.as_bytes()))));
+        .ok_or_else(|| {
+            ApiError::bad(
+                "invalid_provider_payload",
+                "Alchemy payload has no event identifier",
+            )
+        })?;
     let mut tx = state.store.pool().begin().await.map_err(db)?;
     let inserted = sqlx::query("INSERT INTO provider_webhook_events(provider,event_id,payload) VALUES('alchemy',$1,$2) ON CONFLICT DO NOTHING")
-        .bind(&event_id)
+        .bind(event_id)
         .bind(&payload)
         .execute(&mut *tx)
         .await
@@ -138,19 +144,6 @@ async fn alchemy_webhook(
     }
     tx.commit().await.map_err(db)?;
     Ok(StatusCode::NO_CONTENT)
-}
-
-fn valid_alchemy_signature(secrets: &[String], body: &[u8], signature: &str) -> bool {
-    let Ok(supplied) = hex::decode(signature.trim_start_matches("0x")) else {
-        return false;
-    };
-    secrets.iter().any(|secret| {
-        let Ok(mut mac) = Hmac::<Sha256>::new_from_slice(secret.as_bytes()) else {
-            return false;
-        };
-        mac.update(body);
-        mac.verify_slice(&supplied).is_ok()
-    })
 }
 
 async fn health(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
@@ -355,33 +348,44 @@ async fn register_checkout_with_alchemy(
     if state.config.environment.eq_ignore_ascii_case("local") {
         return Ok(());
     }
-    let token = state
-        .config
-        .alchemy_notify_auth_token
-        .as_deref()
-        .ok_or_else(|| {
-            ApiError::new(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "alchemy_not_configured",
-                "ALCHEMY_NOTIFY_AUTH_TOKEN is required outside local mode",
-            )
-        })?;
+    let Some(token) = state.config.alchemy_notify_auth_token.as_deref() else {
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "alchemy_notify_auth_token_missing",
+            "ALCHEMY_NOTIFY_AUTH_TOKEN is required when FLOWPAY_ENV is not local",
+        ));
+    };
 
-    let monitored_networks = [
-        ("BASE_SEPOLIA", ChainKey::Custom("base_sepolia".into())),
-        ("ETH_SEPOLIA", ChainKey::Custom("ethereum_sepolia".into())),
-    ];
+    let networks = alchemy_webhook_networks(&state.config);
+    if networks.is_empty() && !state.config.alchemy_networks.is_empty() {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "alchemy_networks_unmatched",
+            "ALCHEMY_NETWORKS does not match any configured EVM chain",
+        ));
+    }
 
-    for (alchemy_network, chain) in monitored_networks
-        .iter()
-        .filter(|(_, chain)| state.chains.contains_key(chain))
-    {
-        let webhook_id = state.config.alchemy_webhook_ids.get(chain);
-
-        let resolved_id = match webhook_id {
-            Some(id) => id.clone(),
-            None => discover_alchemy_webhook(state, token, alchemy_network).await?,
-        };
+    for (network, chain) in &networks {
+        let webhook_id = state
+            .config
+            .alchemy_webhook_ids
+            .get(chain)
+            .ok_or_else(|| {
+                let env_key = format!(
+                    "ALCHEMY_{}_WEBHOOK_ID",
+                    chain.to_string().to_ascii_uppercase(),
+                );
+                ApiError::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "alchemy_webhook_not_configured",
+                    format!(
+                        "webhook ID is not configured for {network} (chain {chain}); add {env_key} or pre-create the webhook on Alchemy",
+                        network = network,
+                        chain = chain.to_string(),
+                        env_key = env_key,
+                    ),
+                )
+            })?;
 
         let response = state
             .http
@@ -389,7 +393,7 @@ async fn register_checkout_with_alchemy(
             .timeout(StdDuration::from_secs(10))
             .header("X-Alchemy-Token", token)
             .json(&json!({
-                "webhook_id": &resolved_id,
+                "webhook_id": webhook_id,
                 "addresses_to_add": [checkout_address],
                 "addresses_to_remove": []
             }))
@@ -398,24 +402,33 @@ async fn register_checkout_with_alchemy(
 
         match response {
             Ok(resp) if resp.status().is_success() => {
-                tracing::info!(chain=%chain, webhook_id=%resolved_id, %checkout_address, "Alchemy checkout address registered");
+                tracing::info!(%network, webhook_id=%webhook_id, %checkout_address, "Alchemy checkout address registered");
             }
             Ok(resp) => {
                 let status = resp.status();
                 let body = resp.text().await.unwrap_or_default();
-                tracing::error!(%status, %body, chain=%chain, webhook_id=%resolved_id, "Alchemy rejected checkout registration");
+                tracing::error!(%status, body=%body, %network, webhook_id=%webhook_id, %checkout_address, "Alchemy checkout address registration failed");
                 return Err(ApiError::new(
                     StatusCode::SERVICE_UNAVAILABLE,
-                    "alchemy_checkout_registration_failed",
-                    format!("could not register checkout address on {chain}"),
+                    "alchemy_checkout_sync_failed",
+                    format!(
+                        "Alchemy rejected checkout address registration for {network} (webhook {webhook_id}, status {status})",
+                        network = network,
+                        webhook_id = webhook_id,
+                        status = status,
+                    ),
                 ));
             }
             Err(error) => {
-                tracing::error!(%error, chain=%chain, "Alchemy registration request failed");
+                tracing::error!(%error, %network, webhook_id=%webhook_id, %checkout_address, "Alchemy checkout address registration request failed");
                 return Err(ApiError::new(
                     StatusCode::SERVICE_UNAVAILABLE,
-                    "alchemy_api_unavailable",
-                    format!("could not register checkout address on {chain}"),
+                    "alchemy_checkout_sync_failed",
+                    format!(
+                        "Alchemy address synchronization request failed for {network} (webhook {webhook_id})",
+                        network = network,
+                        webhook_id = webhook_id,
+                    ),
                 ));
             }
         }
@@ -423,56 +436,50 @@ async fn register_checkout_with_alchemy(
     Ok(())
 }
 
-async fn discover_alchemy_webhook(
-    state: &AppState,
-    token: &str,
-    network_env_suffix: &str,
-) -> Result<String, ApiError> {
-    let alchemy_api_base = "https://dashboard.alchemy.com/api";
+/// Webhook networks that already have a configured webhook ID.
+/// Checkout creation only uses existing webhooks; it never creates one.
+fn alchemy_webhook_networks(config: &Config) -> Vec<(String, ChainKey)> {
+    let configured = if config.alchemy_networks.is_empty() {
+        vec!["BASE_SEPOLIA".to_owned(), "ETH_SEPOLIA".to_owned()]
+    } else {
+        config.alchemy_networks.clone()
+    };
+    configured
+        .into_iter()
+        .filter_map(|value| {
+            let network = normalize_alchemy_network(&value)?;
+            let chain = alchemy_chain_for_network(&network)?;
+            config
+                .alchemy_webhook_ids
+                .contains_key(&chain)
+                .then_some((network, chain))
+        })
+        .collect()
+}
 
-    // List existing webhooks.
-    let list_response = state
-        .http
-        .get(format!("{}/team-webhooks", alchemy_api_base))
-        .timeout(StdDuration::from_secs(10))
-        .header("X-Alchemy-Token", token)
-        .send()
-        .await
-        .map_err(|error| {
-            tracing::error!(%error, "Alchemy webhook list request failed");
-            ApiError::new(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "alchemy_api_unavailable",
-                "could not list Alchemy webhooks",
-            )
-        })?;
-
-    if list_response.status().is_success() {
-        let body: Value = list_response.json().await.unwrap_or_default();
-        if let Some(webhooks) = body.get("data").and_then(Value::as_array) {
-            for webhook in webhooks {
-                let w_type = webhook
-                    .get("webhook_type")
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
-                let w_network = webhook.get("network").and_then(Value::as_str).unwrap_or("");
-                if w_type.eq_ignore_ascii_case("ADDRESS_ACTIVITY")
-                    && w_network.eq_ignore_ascii_case(network_env_suffix)
-                {
-                    if let Some(id) = webhook.get("id").and_then(Value::as_str) {
-                        tracing::info!(webhook_id=%id, %network_env_suffix, "Found existing Alchemy webhook");
-                        return Ok(id.to_owned());
-                    }
-                }
-            }
-        }
+fn normalize_alchemy_network(value: &str) -> Option<String> {
+    let normalized = value.trim().replace('-', "_").to_ascii_uppercase();
+    match normalized.as_str() {
+        "BASE_SEPOLIA" => Some("BASE_SEPOLIA".into()),
+        "ETH_SEPOLIA" | "ETHEREUM_SEPOLIA" => Some("ETH_SEPOLIA".into()),
+        "ARB_SEPOLIA" | "ARBITRUM_SEPOLIA" => Some("ARB_SEPOLIA".into()),
+        "OPT_SEPOLIA" | "OPTIMISM_SEPOLIA" => Some("OPT_SEPOLIA".into()),
+        "MATIC_AMOY" | "POLYGON_AMOY" => Some("MATIC_AMOY".into()),
+        "BNB_TESTNET" | "BSC_TESTNET" => Some("BNB_TESTNET".into()),
+        _ => None,
     }
+}
 
-    Err(ApiError::new(
-        StatusCode::SERVICE_UNAVAILABLE,
-        "alchemy_webhook_not_found",
-        format!("no Address Activity webhook exists for {network_env_suffix}"),
-    ))
+fn alchemy_chain_for_network(network: &str) -> Option<ChainKey> {
+    Some(match network {
+        "BASE_SEPOLIA" => ChainKey::Custom("base_sepolia".into()),
+        "ETH_SEPOLIA" => ChainKey::Custom("ethereum_sepolia".into()),
+        "ARB_SEPOLIA" => ChainKey::Custom("arbitrum_sepolia".into()),
+        "OPT_SEPOLIA" => ChainKey::Custom("optimism_sepolia".into()),
+        "MATIC_AMOY" => ChainKey::Custom("polygon_amoy".into()),
+        "BNB_TESTNET" => ChainKey::Custom("bsc_testnet".into()),
+        _ => return None,
+    })
 }
 
 async fn get_payment(
@@ -1174,34 +1181,6 @@ async fn list_webhooks(
     let data=rows.into_iter().map(|r|json!({"id":format!("wh_{}",r.try_get::<Uuid,_>("id").unwrap_or_default().simple()),"url":r.try_get::<String,_>("url").unwrap_or_default(),"enabled":r.try_get::<bool,_>("enabled").unwrap_or(false),"events":r.try_get::<Vec<String>,_>("subscribed_events").unwrap_or_default()})).collect::<Vec<_>>();
     Ok(Json(json!({"data":data})))
 }
-
-async fn list_webhook_deliveries(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Json<Value>, ApiError> {
-    let merchant = authenticate(&state, &headers).await?;
-    let rows = sqlx::query(
-        "SELECT d.id,d.response_status,d.attempted_at,e.public_id AS event_id,e.event_type,e.aggregate_public_id,w.url,p.expected_amount_atomic::text AS amount_atomic,p.expected_asset_decimals,p.expected_asset_symbol,p.expected_chain FROM webhook_deliveries d JOIN webhook_events e ON e.id=d.webhook_event_id JOIN webhook_endpoints w ON w.id=d.webhook_endpoint_id LEFT JOIN payments p ON e.aggregate_type='PAYMENT' AND p.public_id=e.aggregate_public_id AND p.merchant_id=e.merchant_id WHERE e.merchant_id=$1 AND d.status='DELIVERED' AND e.event_type='payment.completed' ORDER BY d.attempted_at DESC NULLS LAST LIMIT 20"
-    )
-    .bind(merchant.0)
-    .fetch_all(state.store.pool())
-    .await
-    .map_err(db)?;
-    let data = rows.into_iter().map(|row| json!({
-        "id": format!("wd_{}", row.try_get::<Uuid,_>("id").unwrap_or_default().simple()),
-        "event_id": row.try_get::<String,_>("event_id").unwrap_or_default(),
-        "event": row.try_get::<String,_>("event_type").unwrap_or_default(),
-        "payment_id": row.try_get::<String,_>("aggregate_public_id").unwrap_or_default(),
-        "endpoint": row.try_get::<String,_>("url").unwrap_or_default(),
-        "response_status": row.try_get::<Option<i32>,_>("response_status").unwrap_or(None),
-        "delivered_at": row.try_get::<Option<OffsetDateTime>,_>("attempted_at").unwrap_or(None).map(|value| value.to_string()),
-        "amount_atomic": row.try_get::<Option<String>,_>("amount_atomic").unwrap_or(None),
-        "asset_decimals": row.try_get::<Option<i16>,_>("expected_asset_decimals").unwrap_or(None),
-        "asset": row.try_get::<Option<String>,_>("expected_asset_symbol").unwrap_or(None),
-        "chain": row.try_get::<Option<String>,_>("expected_chain").unwrap_or(None),
-    })).collect::<Vec<_>>();
-    Ok(Json(json!({"data": data})))
-}
 fn validate_webhook_url(value: &str, environment: &str) -> Result<(), ApiError> {
     let parsed = url::Url::parse(value)
         .map_err(|_| ApiError::bad("invalid_webhook_url", "webhook URL is invalid"))?;
@@ -1255,6 +1234,10 @@ async fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<MerchantI
         .and_then(|v| v.to_str().ok())
     {
         Some(k) => k,
+        None if state.config.environment == "local" => {
+            // Dev mode: allow unauthenticated requests from the local merchant dashboard.
+            return Ok(state.config.default_dev_merchant());
+        }
         _ => {
             return Err(ApiError::new(
                 StatusCode::UNAUTHORIZED,
@@ -1622,4 +1605,132 @@ async fn list_logs(
     Ok(Json(
         json!({"data":rows.iter().map(|r|json!({"actor":r.try_get::<String,_>("actor_type").unwrap_or_default(),"actor_id":r.try_get::<Option<String>,_>("actor_id").ok().flatten(),"action":r.try_get::<String,_>("action").unwrap_or_default(),"request_id":r.try_get::<Option<String>,_>("request_id").ok().flatten(),"correlation_id":r.try_get::<Option<String>,_>("correlation_id").ok().flatten(),"chain":r.try_get::<Option<String>,_>("chain").ok().flatten(),"transaction_hash":r.try_get::<Option<String>,_>("tx_hash").ok().flatten(),"outcome":r.try_get::<String,_>("outcome").unwrap_or_default(),"details":r.try_get::<Value,_>("metadata_redacted").unwrap_or(Value::Null),"created_at":r.try_get::<OffsetDateTime,_>("occurred_at").map(|v|v.to_string()).unwrap_or_default()})).collect::<Vec<_>>() }),
     ))
+}
+
+#[cfg(test)]
+mod alchemy_checkout_sync_tests {
+    use super::*;
+    use crate::config::Config;
+    use std::collections::HashMap;
+
+    fn test_config() -> Config {
+        let mut chains = HashMap::new();
+        chains.insert(
+            ChainKey::Custom("base_sepolia".into()),
+            crate::config::ChainConfig {
+                chain: ChainKey::Custom("base_sepolia".into()),
+                rpc_url: "https://base-sepolia-rpc.publicnode.com".into(),
+                numeric_chain_id: 84532,
+                factory_address: "0x351E7e39456c21f6d2aF3fDf3bcd391E92775cb5".into(),
+            },
+        );
+        chains.insert(
+            ChainKey::Custom("bsc_testnet".into()),
+            crate::config::ChainConfig {
+                chain: ChainKey::Custom("bsc_testnet".into()),
+                rpc_url: "https://bsc-testnet-rpc.publicnode.com".into(),
+                numeric_chain_id: 97,
+                factory_address: "0x351E7e39456c21f6d2aF3fDf3bcd391E92775cb5".into(),
+            },
+        );
+        Config {
+            bind: "0.0.0.0:8080".into(),
+            database_url: "postgres://flowpay:flowpay@localhost:5432/flowpay".into(),
+            environment: "production".into(),
+            checkout_base_url: "https://checkout.example.test".into(),
+            api_key_pepper: "pepper".into(),
+            proxy_creation_code_hash:
+                "0x7fec5ea1a8a7c531e89efcb2bb71a816cf43f4ee27803cba624500c6634919d8".into(),
+            factory_runtime_code_hash: Some(
+                "0x3081d39267aa8c34d6e4c87c5662cf873e94c7e9a8d136810cf6c54e82262427".into(),
+            ),
+            operator_address: "0xe6E2aB64586E82aB45B27FCC7ED286850269e4Eb".into(),
+            operator_private_key: None,
+            faucet_address: None,
+            evidence_dir: "./runtime/evidence".into(),
+            webhook_encryption_key: vec![0_u8; 32],
+            chains,
+            agent_mode: "model".into(),
+            model_provider: "ollama".into(),
+            openai_api_key: None,
+            openai_model: "qwen2.5-coder:7b".into(),
+            openai_endpoint: "http://127.0.0.1:11434/api/chat".into(),
+            agent_max_steps: 12,
+            agent_retry_budget: 3,
+            rabbitmq_url: "amqp://guest:guest@127.0.0.1:5672/%2f".into(),
+            provider_webhook_secret: None,
+            provider_webhook_secrets: vec![],
+            provider_webhook_path: "/v1/providers/alchemy/webhook".into(),
+            provider_webhook_url: None,
+            alchemy_api_key: None,
+            alchemy_networks: vec![],
+            alchemy_notify_auth_token: None,
+            alchemy_webhook_ids: HashMap::new(),
+            alchemy_notify_endpoint: "https://dashboard.alchemy.com/api/update-webhook-addresses"
+                .into(),
+        }
+    }
+
+    /// Local mode must not require any Alchemy configuration.
+    #[test]
+    fn local_mode_is_exempt_from_alchemy_requirements() {
+        let mut config = test_config();
+        config.environment = "local".into();
+        config.alchemy_notify_auth_token = None;
+        config.alchemy_webhook_ids = HashMap::new();
+
+        let monitored = alchemy_webhook_networks(&config);
+        assert!(monitored.is_empty());
+    }
+
+    /// Only chains with a configured webhook ID are monitored.
+    #[test]
+    fn webhook_networks_require_existing_webhook_ids() {
+        let mut config = test_config();
+        config.environment = "production".into();
+        config.alchemy_networks = vec!["base-sepolia".into(), "bsc-testnet".into()];
+        config.alchemy_webhook_ids = HashMap::new();
+
+        let monitored = alchemy_webhook_networks(&config);
+        assert!(monitored.is_empty());
+    }
+
+    /// Configured webhook IDs must line up with ALCHEMY_NETWORKS.
+    #[test]
+    fn webhook_networks_only_include_configured_chains() {
+        let mut config = test_config();
+        config.environment = "production".into();
+        config.alchemy_networks = vec![
+            "base-sepolia".into(),
+            "bsc-testnet".into(),
+        ];
+        config
+            .alchemy_webhook_ids
+            .insert(ChainKey::Custom("base_sepolia".into()), "wh_base".into());
+        config
+            .alchemy_webhook_ids
+            .insert(ChainKey::Custom("bsc_testnet".into()), "wh_bsc".into());
+
+        let monitored = alchemy_webhook_networks(&config);
+        let pairs: Vec<_> = monitored
+            .into_iter()
+            .map(|(network, chain)| (network, chain.to_string()))
+            .collect();
+
+        // ALCHEMY_NETWORKS names are normalized before matching webhook IDs.
+        assert!(pairs.contains(&("BASE_SEPOLIA".into(), "base_sepolia".into())));
+        assert!(pairs.contains(&("BNB_TESTNET".into(), "bsc_testnet".into())));
+    }
+
+    /// ALCHEMY_NETWORKS without webhook IDs must not pretend a webhook exists.
+    #[test]
+    fn mismatched_alchemy_networks_fails_fast() {
+        let mut config = test_config();
+        config.environment = "production".into();
+        config.alchemy_networks = vec!["base-sepolia".into()];
+        config.alchemy_webhook_ids = HashMap::new();
+
+        let monitored = alchemy_webhook_networks(&config);
+        assert!(monitored.is_empty());
+    }
 }
