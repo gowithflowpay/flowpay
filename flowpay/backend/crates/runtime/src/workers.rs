@@ -560,6 +560,7 @@ async fn payment_monitor_tick(state: &AppState) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)]
 pub(crate) async fn process_alchemy_webhook(
     state: &AppState,
     payload: &Value,
@@ -707,6 +708,7 @@ pub(crate) async fn process_alchemy_webhook(
     Ok(())
 }
 
+#[allow(dead_code)]
 async fn reconcile_webhook_payment(
     state: &AppState,
     payment_id: flowpay_domain::PaymentId,
@@ -767,6 +769,7 @@ async fn reconcile_webhook_payment(
     Ok(())
 }
 
+#[allow(dead_code)]
 fn parse_hex_u64(value: &str) -> Option<u64> {
     u64::from_str_radix(value.strip_prefix("0x").unwrap_or(value), 16).ok()
 }
