@@ -52,6 +52,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/logs", get(list_logs))
         .route("/v1/overview", get(get_overview))
         .route("/v1/merchant/overview", get(get_overview))
+        .route("/v1/agent/chat", post(agent_chat))
         .with_state(state)
 }
 
@@ -103,8 +104,8 @@ async fn alchemy_webhook(
     let payload: Value = serde_json::from_str(&body)
         .map_err(|_| ApiError::bad("invalid_provider_payload", "provider payload must be JSON"))?;
     let event_id = payload
-        .get("webhookId")
-        .or_else(|| payload.get("id"))
+        .get("id")
+        .or_else(|| payload.get("webhookId"))
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| {
@@ -762,7 +763,8 @@ async fn get_claim(
             v.get("matches").and_then(Value::as_bool) == Some(true)
                 && v.get("factory_verified").and_then(Value::as_bool) == Some(true)
         });
-    let funds_present = latest_tool_output("get_token_balance")
+    let funds_present = latest_tool_output("get_asset_balance")
+        .or_else(|| latest_tool_output("get_token_balance"))
         .and_then(|v| v.get("balance_atomic"))
         .is_some_and(|v| match v {
             Value::String(s) => s != "0",
@@ -979,11 +981,14 @@ async fn retry_claim(
         .get_claim(merchant, &id)
         .await
         .map_err(map_store)?;
-    if claim.state != ClaimState::Escalated {
+    if !matches!(
+        claim.state,
+        ClaimState::Escalated | ClaimState::NeedsMoreEvidence
+    ) {
         return Err(ApiError::new(
             StatusCode::CONFLICT,
             "claim_not_retryable",
-            "only an escalated claim can be retried",
+            "only an escalated or needs-more-evidence claim can be retried",
         ));
     }
     let payment = state
@@ -991,6 +996,26 @@ async fn retry_claim(
         .get_payment_by_id(claim.payment_id)
         .await
         .map_err(map_store)?;
+    let has_approved_plan: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM approvals WHERE claim_id=$1 AND status='APPROVED' AND expires_at>now())",
+    )
+    .bind(claim.id.0)
+    .fetch_one(state.store.pool())
+    .await
+    .map_err(db)?;
+    if has_approved_plan {
+        state
+            .store
+            .set_claim_state(
+                claim.id,
+                ClaimState::ApprovalPending,
+                "resume_claimant_authorized_recovery",
+                "SYSTEM",
+            )
+            .await
+            .map_err(db)?;
+        return Ok(Json(json!({"id":id,"status":"APPROVAL_PENDING"})));
+    }
     if payment.state == PaymentState::Escalated {
         state
             .store
@@ -1010,7 +1035,7 @@ async fn retry_claim(
             claim.id,
             ClaimState::Investigating,
             "operator_retry_after_system_fix",
-            "MERCHANT",
+            "SYSTEM",
         )
         .await
         .map_err(db)?;
@@ -1689,6 +1714,173 @@ async fn list_logs(
     Ok(Json(
         json!({"data":rows.iter().map(|r|json!({"actor":r.try_get::<String,_>("actor_type").unwrap_or_default(),"actor_id":r.try_get::<Option<String>,_>("actor_id").ok().flatten(),"action":r.try_get::<String,_>("action").unwrap_or_default(),"request_id":r.try_get::<Option<String>,_>("request_id").ok().flatten(),"correlation_id":r.try_get::<Option<String>,_>("correlation_id").ok().flatten(),"chain":r.try_get::<Option<String>,_>("chain").ok().flatten(),"transaction_hash":r.try_get::<Option<String>,_>("tx_hash").ok().flatten(),"outcome":r.try_get::<String,_>("outcome").unwrap_or_default(),"details":r.try_get::<Value,_>("metadata_redacted").unwrap_or(Value::Null),"created_at":r.try_get::<OffsetDateTime,_>("occurred_at").map(|v|v.to_string()).unwrap_or_default()})).collect::<Vec<_>>() }),
     ))
+}
+
+#[derive(Debug, Deserialize)]
+struct AgentChatRequest {
+    payment_id: String,
+    messages: Vec<AgentChatMessage>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+struct AgentChatMessage {
+    role: String,
+    content: String,
+}
+
+/// Lightweight agent chat endpoint for the checkout page.
+/// Uses Ollama to triage wrong-asset/wrong-chain claims conversationally.
+/// When enough information is collected, creates a claim and returns the result.
+async fn agent_chat(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<AgentChatRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let merchant = authenticate(&state, &headers).await?;
+    // Load the payment to get context
+    let payment = state
+        .store
+        .get_payment(merchant, &req.payment_id)
+        .await
+        .map_err(map_store)?;
+
+    // Build the Ollama prompt with payment context
+    let system_prompt = format!(
+        "You are FlowPay's support agent helping with payment issues. \
+You are currently helping with checkout {checkout_id} for {amount} {asset} on {chain}. \
+The checkout address is {address}. \
+\nYour job is to help the user file a claim for a wrong-asset or wrong-chain payment. \
+Ask the user these questions one at a time if they haven't provided them: \
+1. Which network did you send on? (e.g., Ethereum, Base, BSC) \
+2. Which token did you send? (e.g., USDC, USDT, ETH) \
+3. How much did you send? \
+4. What is the transaction hash? \
+\nOnce you have ALL FOUR pieces of information, respond with a JSON object like: \
+{{\"action\":\"submit_claim\",\"network\":\"...\",\"token\":\"...\",\"amount\":\"...\",\"tx_hash\":\"...\",\"message\":\"Submitting your claim now...\"}} \
+\nBe friendly and concise. Guide the user step by step. If the info is incomplete, ask what's missing.",
+        checkout_id = payment.public_id,
+        amount = payment.expected_amount.to_decimal(payment.expected_asset.decimals),
+        asset = payment.expected_asset.symbol,
+        chain = payment.expected_chain,
+        address = payment.checkout_address.value,
+    );
+
+    // Convert messages for Ollama
+    let mut ollama_messages = vec![json!({"role":"system","content":system_prompt})];
+    for msg in &req.messages {
+        ollama_messages.push(json!({"role":msg.role,"content":msg.content}));
+    }
+
+    // Call Ollama
+    let ollama_url = if state.config.openai_endpoint.is_empty() {
+        "http://127.0.0.1:11434"
+    } else {
+        &state.config.openai_endpoint
+    };
+    let ollama_model = &state.config.openai_model;
+    let response = state
+        .http
+        .post(format!("{ollama_url}/api/chat"))
+        .timeout(StdDuration::from_secs(30))
+        .json(&json!({
+            "model": ollama_model,
+            "messages": ollama_messages,
+            "stream": false,
+            "options": {"temperature": 0}
+        }))
+        .send()
+        .await;
+
+    match response {
+        Ok(resp) if resp.status().is_success() => {
+            let payload: Value = resp.json().await.map_err(internal)?;
+            let content = payload
+                .pointer("/message/content")
+                .and_then(Value::as_str)
+                .unwrap_or("I'm here to help. Could you tell me more about your issue?");
+
+            // Check if the agent decided to submit a claim
+            if let Ok(parsed) = serde_json::from_str::<Value>(content) {
+                if parsed.get("action").and_then(Value::as_str) == Some("submit_claim") {
+                    let network = parsed.get("network").and_then(Value::as_str).unwrap_or("");
+                    let token = parsed.get("token").and_then(Value::as_str).unwrap_or("");
+                    let amount = parsed.get("amount").and_then(Value::as_str).unwrap_or("");
+                    let tx_hash = parsed.get("tx_hash").and_then(Value::as_str).unwrap_or("");
+                    let msg = parsed
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("Submitting claim...");
+
+                    // Map network string to ChainKey
+                    let chain_key = match network.to_lowercase().as_str() {
+                        "ethereum" | "eth" | "ethereum sepolia" | "eth sepolia" => {
+                            ChainKey::Custom("ethereum_sepolia".into())
+                        }
+                        "base" | "base sepolia" => ChainKey::Custom("base_sepolia".into()),
+                        "arbitrum" | "arb" | "arb sepolia" => {
+                            ChainKey::Custom("arbitrum_sepolia".into())
+                        }
+                        _ => payment.expected_chain.clone(),
+                    };
+
+                    // Create the claim via existing infrastructure
+                    let claim_id = ClaimId::new();
+                    let public_id = format!("clm_{}", claim_id.0.simple());
+                    let claim = StoredClaim {
+                        id: claim_id,
+                        public_id: public_id.clone(),
+                        merchant_id: merchant,
+                        payment_id: payment.id,
+                        state: ClaimState::AwaitingEvidence,
+                        expected_chain: payment.expected_chain.clone(),
+                        claimed_chain: Some(chain_key),
+                        expected_asset: payment.expected_asset.symbol.clone(),
+                        claimed_asset: Some(token.to_owned()),
+                        transaction_hash: Some(tx_hash.to_owned()),
+                        originating_wallet: None,
+                        recovery_destination: payment.checkout_address.value.clone(),
+                        explanation: format!(
+                            "Wrong asset: sent {} {} (expected {} {}) on {}",
+                            amount,
+                            token,
+                            payment
+                                .expected_amount
+                                .to_decimal(payment.expected_asset.decimals),
+                            payment.expected_asset.symbol,
+                            network
+                        ),
+                    };
+                    state.store.create_claim(&claim).await.map_err(db)?;
+
+                    return Ok(Json(json!({
+                        "reply": msg,
+                        "claim_id": public_id,
+                        "status": "CLAIM_CREATED"
+                    })));
+                }
+            }
+
+            Ok(Json(json!({"reply": content})))
+        }
+        _ => {
+            // Ollama unavailable — fall back to simple guided flow
+            let last_user = req
+                .messages
+                .iter()
+                .rev()
+                .find(|m| m.role == "user")
+                .map_or("", |m| m.content.as_str());
+            let lower = last_user.to_lowercase();
+            let reply = if req.messages.len() <= 1 {
+                "I can help you with that! Let me ask a few questions:\n\n1. Which network did you send on? (e.g., Ethereum, Base)\n2. Which token did you send? (e.g., USDC, ETH)\n3. How much did you send?\n4. What is the transaction hash?".to_string()
+            } else if lower.contains("tx") || lower.contains("0x") {
+                "Got it! I have your transaction hash. Could you also tell me the network, token, and amount if you haven't already?".to_string()
+            } else {
+                "Thanks! I'm still missing some details. Please provide: network, token, amount, and transaction hash.".to_string()
+            };
+            Ok(Json(json!({"reply": reply})))
+        }
+    }
 }
 
 #[cfg(test)]

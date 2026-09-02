@@ -19,7 +19,7 @@ Required investigation procedure:
 2. Verify the claimant's wallet authorization and compare the authorized wallet with the verified transaction sender.
 3. Query the claimed transaction on the claimed chain and verify its receipt, success, canonical block, recipient, token contract, and amount.
 4. Verify the recipient is FlowPay's deterministic checkout address for that payment on that chain and verify the factory identity/recovery capability.
-5. Check the current balance of the exact verified token at that checkout address.
+5. Check the current balance of the exact verified asset at that checkout address, using a null token contract for native currency.
 6. Compare the verified chain, token, and amount with the expected payment. Classify the exception as wrong chain, wrong asset, underpayment, overpayment, or an unverified/ambiguous claim.
 7. Recommend exactly one bounded outcome: RECOVERABLE_CANDIDATE, NEEDS_MORE_EVIDENCE, NOT_RECOVERABLE, or ESCALATE.
 
@@ -28,7 +28,7 @@ Evidence rules:
 - Never infer a transaction from a screenshot or accept a hash without querying the configured chain adapter.
 - Never treat a same-address transfer on another chain as a valid payment for the expected chain.
 - Do not recommend recovery when the transaction is not sent to the deterministic FlowPay checkout address, funds are gone, ownership is not verified, or provider facts conflict.
-- Cross-chain and amount-discrepancy claims may be recoverable candidates only after verification; deterministic policy will require human approval for those cases.
+- Cross-chain and amount-discrepancy claims may be recoverable candidates only after verification; deterministic policy requires a verified claimant signature before execution.
 - Prefer ESCALATE when facts conflict, the network/token is unsupported, provider results are unreliable, or control cannot be proven.
 - Prefer NEEDS_MORE_EVIDENCE when ownership is not cryptographically established or required claim facts are missing.
 - NOT_RECOVERABLE is appropriate only when verified facts show the transaction/funds cannot be recovered (for example a nonexistent/reverted transaction or zero remaining balance).
@@ -263,11 +263,8 @@ impl EvidenceLedger {
                 "counterfactual checkout address and factory control must be verified".into(),
             );
         }
-        if self.tx_token.is_none() {
-            return Err("this model-driven path currently requires an ERC-20 transfer".into());
-        }
         if self.balance_positive != Some(true) {
-            return Err("current token balance must be positive".into());
+            return Err("current asset balance must be positive".into());
         }
         Ok(())
     }
@@ -421,12 +418,17 @@ where
                         }
                         Err(reason) => {
                             // Return deterministic rejection to the model so it can gather the missing fact.
-                            history.push(json!({
-                                "role":"user",
-                                "content":[{"type":"input_text","text":format!(
-                                    "Deterministic decision gate rejected that disposition: {reason}. Use the available investigation tools to resolve it or choose a safe outcome."
-                                )}]
-                            }));
+                            let message = format!(
+                                "Deterministic decision gate rejected that disposition: {reason}. Use the available investigation tools to resolve it or choose a safe outcome."
+                            );
+                            if self.model.config.protocol == ModelProtocol::OllamaChat {
+                                history.push(json!({"role":"user","content":message}));
+                            } else {
+                                history.push(json!({
+                                    "role":"user",
+                                    "content":[{"type":"input_text","text":message}]
+                                }));
+                            }
                         }
                     }
                 }
@@ -490,10 +492,9 @@ where
             },
             "get_transaction" => {
                 let parsed: Result<GetTransactionArgs, _> = serde_json::from_str(&call.arguments);
-                let Ok(args) = parsed else {
+                let Ok(_args) = parsed else {
                     return bad_args("get_transaction", ledger);
                 };
-                let _model_request = (&args.chain, &args.transaction_hash);
                 let Some(chain) = ledger.claimed_chain.clone() else {
                     return structured_failure(
                         "claim_facts_required",
@@ -538,10 +539,9 @@ where
             }
             "verify_counterfactual_address" => {
                 let parsed: Result<VerifyAddressArgs, _> = serde_json::from_str(&call.arguments);
-                let Ok(args) = parsed else {
+                let Ok(_args) = parsed else {
                     return bad_args("verify_counterfactual_address", ledger);
                 };
-                let _model_request = (&args.chain, &args.candidate_address);
                 let Some(chain) = ledger.tx_chain.clone() else {
                     return structured_failure(
                         "transaction_facts_required",
@@ -572,22 +572,15 @@ where
                     Err(error) => tool_error("verify_counterfactual_address", error, ledger),
                 }
             }
-            "get_token_balance" => {
+            "get_asset_balance" => {
                 let parsed: Result<GetBalanceArgs, _> = serde_json::from_str(&call.arguments);
-                let Ok(args) = parsed else {
-                    return bad_args("get_token_balance", ledger);
+                let Ok(_args) = parsed else {
+                    return bad_args("get_asset_balance", ledger);
                 };
-                let _model_request = (&args.chain, &args.token_contract, &args.address);
                 let Some(chain) = ledger.tx_chain.clone() else {
                     return structured_failure(
                         "transaction_facts_required",
                         "verify the transaction before checking its token balance",
-                    );
-                };
-                let Some(token_contract) = ledger.tx_token.clone() else {
-                    return structured_failure(
-                        "transaction_facts_required",
-                        "verified transaction is not an ERC-20 transfer",
                     );
                 };
                 let Some(address) = ledger.tx_to.clone() else {
@@ -598,7 +591,7 @@ where
                 };
                 match self
                     .tools
-                    .get_token_balance(ctx, chain, &token_contract, &address)
+                    .get_asset_balance(ctx, chain, ledger.tx_token.as_deref(), &address)
                     .await
                 {
                     Ok(balance) => {
@@ -610,7 +603,7 @@ where
                             None,
                         )
                     }
-                    Err(error) => tool_error("get_token_balance", error, ledger),
+                    Err(error) => tool_error("get_asset_balance", error, ledger),
                 }
             }
             "submit_investigation_decision" => {
@@ -737,13 +730,13 @@ where
                 "policy_gate.request_approval",
                 json!({"plan_id":plan.id}),
                 json!({"approval_id":approval.approval_id,"status":approval.status}),
-                "deterministic policy requires a human approval checkpoint",
-                "Cross-chain and amount-discrepancy refunds are never auto-executed.",
+                "the verified claimant signature authorizes deterministic execution",
+                "The model cannot approve or execute a recovery.",
             ));
             return Ok(AgentRunResult {
                 status: AgentRunStatus::RecoverableAwaitingApproval,
                 concise_rationale:
-                    "recovery passed verification and simulation and is waiting for human approval"
+                    "recovery passed verification and simulation and has claimant authorization"
                         .into(),
                 plan_id: Some(plan.id),
                 approval_id: Some(approval.approval_id),
@@ -860,22 +853,25 @@ where
     }
 }
 
+#[allow(dead_code)]
 #[derive(Deserialize)]
 struct GetTransactionArgs {
     chain: String,
     transaction_hash: String,
 }
 
+#[allow(dead_code)]
 #[derive(Deserialize)]
 struct VerifyAddressArgs {
     chain: String,
     candidate_address: String,
 }
 
+#[allow(dead_code)]
 #[derive(Deserialize)]
 struct GetBalanceArgs {
     chain: String,
-    token_contract: String,
+    token_contract: Option<String>,
     address: String,
 }
 
@@ -997,8 +993,8 @@ fn tool_schemas() -> Vec<Value> {
             "parameters":{"type":"object","properties":{"chain":{"type":"string","enum":["base","bsc","bsc_testnet","ethereum_sepolia","base_sepolia","arbitrum_sepolia","optimism_sepolia","polygon_amoy"]},"candidate_address":{"type":"string"}},"required":["chain","candidate_address"],"additionalProperties":false}
         }),
         json!({
-            "type":"function","name":"get_token_balance","description":"Read the current ERC-20 balance at a checkout address on a supported EVM chain.","strict":true,
-            "parameters":{"type":"object","properties":{"chain":{"type":"string","enum":["base","bsc","bsc_testnet","ethereum_sepolia","base_sepolia","arbitrum_sepolia","optimism_sepolia","polygon_amoy"]},"token_contract":{"type":"string"},"address":{"type":"string"}},"required":["chain","token_contract","address"],"additionalProperties":false}
+            "type":"function","name":"get_asset_balance","description":"Read the current native or ERC-20 balance at a checkout address on a supported EVM chain. Use null token_contract for native currency.","strict":true,
+            "parameters":{"type":"object","properties":{"chain":{"type":"string","enum":["base","bsc","bsc_testnet","ethereum_sepolia","base_sepolia","arbitrum_sepolia","optimism_sepolia","polygon_amoy"]},"token_contract":{"type":["string","null"]},"address":{"type":"string"}},"required":["chain","token_contract","address"],"additionalProperties":false}
         }),
         json!({
             "type":"function","name":"submit_investigation_decision","description":"Submit a constrained investigation recommendation. This cannot approve, sign, or execute recovery.","strict":true,

@@ -1,15 +1,15 @@
 "use client";
 
 import Image from "next/image";
-import {useCallback,useEffect,useMemo,useRef,useState} from "react";
+import {useCallback,useEffect,useMemo,useState} from "react";
 import {Brand,LanguageButton} from "../../components/Brand";
 import {
-  ArrowRightIcon,CheckIcon,ClockIcon,CopyIcon,
-  InfoIcon,LifebuoyIcon,LockIcon
+  ArrowLeftIcon,CheckIcon,ClockIcon,CopyIcon,HeadphonesIcon,
+  InfoIcon,LifebuoyIcon,ShieldIcon
 } from "../../components/Icons";
 import {QrCode} from "../../components/QrCode";
 
-type Payment={
+export type Payment={
   id:string;
   address:string;
   amount:string;
@@ -23,19 +23,25 @@ type Payment={
   checkout_url?:string;
 };
 
-type Deposit={amount_atomic?:string;asset_symbol?:string;asset?:string;confirmation_status?:string};
+export type Deposit={amount_atomic?:string;asset_symbol?:string;asset?:string;confirmation_status?:string};
 
 type ChainMeta={label:string;asset:string};
 const chainMeta:Record<string,ChainMeta>={
   base:{label:"Base",asset:"/assets/base.svg"},
+  base_sepolia:{label:"Base Sepolia",asset:"/assets/base.svg"},
   bsc:{label:"BNB Smart Chain",asset:"/assets/bsc.svg"},
+  bsc_testnet:{label:"BNB Smart Chain Testnet",asset:"/assets/bsc.svg"},
+  ethereum:{label:"Ethereum",asset:"/assets/ethereum.svg"},
+  ethereum_sepolia:{label:"Ethereum Sepolia",asset:"/assets/ethereum.svg"},
+  arbitrum:{label:"Arbitrum",asset:"/assets/ethereum.svg"},
+  arbitrum_sepolia:{label:"Arbitrum Sepolia",asset:"/assets/ethereum.svg"},
 };
 const terminal=new Set(["COMPLETED","RECOVERED","EXPIRED","FAILED","CANCELLED","ESCALATED"]);
+const successStates=new Set(["CONFIRMED","SETTLING","COMPLETED","RECOVERED"]);
 const stableAssets=new Set(["USDC","USDT"]);
 
 function shortAddress(value:string){return value.length>18?`${value.slice(0,7)}…${value.slice(-5)}`:value;}
 function merchantName(payment:Payment){return payment.merchant_name?.trim()||"FlowPay merchant";}
-function tokenIcon(asset:string){return asset.toUpperCase()==="USDT"?"/assets/usdt.svg":"/assets/usdc.svg";}
 function dollarDisplay(amount:string,asset:string){
   if(!stableAssets.has(asset.toUpperCase()))return amount;
   const raw=amount.trim().replace(/^\+/,"");
@@ -46,12 +52,14 @@ function dollarDisplay(amount:string,asset:string){
   const fraction=(fractionRaw+"00").slice(0,2);
   return `${sign}$${grouped}.${fraction}`;
 }
+function amountDisplay(amount:string,asset:string){const value=Number(amount);return stableAssets.has(asset.toUpperCase())&&Number.isFinite(value)?value.toFixed(2):amount;}
+function expiryTime(value:string){const normalized=value.replace(/^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}(?:\.\d+)?) ([+-]\d{2}:\d{2}):\d{2}$/,"$1T$2$3");const parsed=new Date(normalized).getTime();return Number.isNaN(parsed)?Date.now():parsed;}
 function stateCopy(status:string){
   switch(status){
     case "DETECTED":return ["Payment detected","We found your transaction and are verifying it on-chain."];
     case "CONFIRMING":return ["Confirming payment","Waiting for the required blockchain confirmations."];
     case "PARTIALLY_PAID":return ["Partial payment received","Send the remaining amount to the same checkout address."];
-    case "CONFIRMED":return ["Payment confirmed","Your payment has enough confirmations."];
+    case "CONFIRMED":return ["Payment confirmed!","Your payment was received and verified. Finalizing now..."];
     case "SETTLING":return ["Finalizing payment","FlowPay is settling the confirmed payment to the merchant."];
     case "COMPLETED":return ["Payment complete","The merchant has been notified successfully."];
     case "RECOVERED":return ["Funds recovered","The approved recovery was verified on-chain."];
@@ -69,13 +77,19 @@ function stateCopy(status:string){
   }
 }
 
-export function CheckoutClient({paymentId,home=false}:{paymentId:string;home?:boolean}){
-  const [payment,setPayment]=useState<Payment|null>(null);
-  const [deposits,setDeposits]=useState<Deposit[]>([]);
+type CheckoutClientProps={paymentId:string;home?:boolean;suppressOutcome?:boolean;initialPayment?:Payment|null;initialDeposits?:Deposit[]};
+
+export function CheckoutClient({paymentId,home=false,suppressOutcome=false,initialPayment=null,initialDeposits=[]}:CheckoutClientProps){
+  const [payment,setPayment]=useState<Payment|null>(initialPayment);
+  const [deposits,setDeposits]=useState<Deposit[]>(initialDeposits);
   const [error,setError]=useState("");
   const [copied,setCopied]=useState(false);
   const [remaining,setRemaining]=useState(0);
-  const successRedirected=useRef(false);
+  const [showSuccess,setShowSuccess]=useState(false);
+  const [chatOpen,setChatOpen]=useState(false);
+  const [chatMessages,setChatMessages]=useState<{role:string;content:string}[]>([]);
+  const [chatInput,setChatInput]=useState("");
+  const [chatLoading,setChatLoading]=useState(false);
 
   const load=useCallback(async()=>{
     try{
@@ -84,10 +98,6 @@ export function CheckoutClient({paymentId,home=false}:{paymentId:string;home?:bo
       if(!response.ok)throw new Error(body?.error||"Unable to load payment");
       setPayment(body);
       setError("");
-      if((body.status==="COMPLETED"||body.status==="RECOVERED")&&!successRedirected.current){
-        successRedirected.current=true;
-        window.setTimeout(()=>{window.location.assign(`/pay/${encodeURIComponent(paymentId)}/success`);},700);
-      }
       const depositsResponse=await fetch(`/api/payment/${encodeURIComponent(paymentId)}/deposits`,{cache:"no-store"});
       if(depositsResponse.ok){
         const depositBody=await depositsResponse.json();
@@ -98,17 +108,25 @@ export function CheckoutClient({paymentId,home=false}:{paymentId:string;home?:bo
     }
   },[paymentId]);
 
+  const paymentStatus=payment?.status;
+  useEffect(()=>{
+    if(suppressOutcome||!paymentStatus||!successStates.has(paymentStatus))return;
+    setShowSuccess(true);
+    const timer=window.setTimeout(()=>window.location.replace(`/pay/${encodeURIComponent(paymentId)}/success`),2200);
+    return()=>window.clearTimeout(timer);
+  },[paymentId,paymentStatus,suppressOutcome]);
+
   useEffect(()=>{
     void load();
     const timer=window.setInterval(()=>{
       if(!payment||!terminal.has(payment.status))void load();
-    },3500);
+    },1000);
     return()=>window.clearInterval(timer);
   },[load,payment?.status]);
 
   useEffect(()=>{
     if(!payment)return;
-    const tick=()=>setRemaining(Math.max(0,Math.floor((new Date(payment.expires_at).getTime()-Date.now())/1000)));
+    const tick=()=>setRemaining(Math.max(0,Math.floor((expiryTime(payment.expires_at)-Date.now())/1000)));
     tick();
     const timer=window.setInterval(tick,1000);
     return()=>window.clearInterval(timer);
@@ -121,6 +139,38 @@ export function CheckoutClient({paymentId,home=false}:{paymentId:string;home?:bo
     await navigator.clipboard.writeText(payment.address);
     setCopied(true);
     window.setTimeout(()=>setCopied(false),1400);
+  };
+
+  const sendChat=async()=>{
+    if(!chatInput.trim()||chatLoading||!payment)return;
+    const userMsg={role:"user",content:chatInput.trim()};
+    const updated=[...chatMessages,userMsg];
+    setChatMessages(updated);
+    setChatInput("");
+    setChatLoading(true);
+    try{
+      const resp=await fetch(`/api/payment/${encodeURIComponent(paymentId)}/agent`,{
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({payment_id:payment.id,messages:updated}),
+      });
+      const body=await resp.json();
+      const agentMsg={role:"agent",content:body.reply||"I'm here to help."};
+      setChatMessages([...updated,agentMsg]);
+      if(body.status==="CLAIM_CREATED"){
+        setChatMessages([...updated,agentMsg,{role:"system",content:`Claim ${body.claim_id} created. Our team will investigate and process your refund.`}]);
+      }
+    }catch{
+      setChatMessages([...updated,{role:"agent",content:"Sorry, I couldn't process that. Please try again."}]);
+    }
+    setChatLoading(false);
+  };
+
+  const openChat=()=>{
+    setChatOpen(true);
+    if(chatMessages.length===0){
+      setChatMessages([{role:"agent",content:"Hi! I'm FlowPay's support agent. I can help if you sent the wrong asset or had a payment issue. What's the problem?"}]);
+    }
   };
 
   if(error)return <main className="checkout-shell">
@@ -142,72 +192,69 @@ export function CheckoutClient({paymentId,home=false}:{paymentId:string;home?:bo
   const network=chainMeta[payment.chain]??{label:payment.chain,asset:"/assets/base.svg"};
   const status=payment.status||"WAITING";
   const [statusTitle,statusText]=stateCopy(status);
-  const isDone=status==="COMPLETED"||status==="RECOVERED";
+  const isDone=status==="COMPLETED"||status==="RECOVERED"||status==="CONFIRMED"||status==="SETTLING";
   // Show claim link for any non-terminal state, including expired — users who sent funds need recovery.
   const canClaim=!isDone;
 
   return <main className={`checkout-shell${home?" checkout-preview":""}`}>
-    <header className="payment-header"><span/><Brand/><LanguageButton/></header>
+    <header className="payment-header reference-header"><Brand/><span/><div className="checkout-header-actions"><LanguageButton/><button className="checkout-theme" type="button" aria-label="Display settings">☼</button></div></header>
+    <section className="reference-checkout" aria-labelledby="payment-title">
+      <div className="reference-summary"><div className="reference-summary-inner">
+        <span className="paying-label">Paying {merchantName(payment)}</span>
+        <h1 id="payment-title"><strong>{amountDisplay(payment.amount,payment.asset)}</strong><small>{payment.asset}</small></h1>
+        {stableAssets.has(payment.asset.toUpperCase())?<p>≈ {dollarDisplay(payment.amount,payment.asset)} USD</p>:null}
+        <details className="reference-network"><summary><Image src={network.asset} width={24} height={24} alt=""/><strong>{network.label}</strong><span className="network-chevron">⌄</span></summary></details>
+        <div className="secure-copy"><ShieldIcon/><p><strong>Your payment is secure and encrypted.</strong><span>We never store your funds.</span></p></div>
+        <div className="summary-rule"/>
+        <div className="expiry-copy"><ClockIcon/><p><span>Payment expires in</span><strong>{time}</strong></p></div>
+      </div></div>
+      <div className="reference-payment"><div className="reference-payment-inner">
+        <h2>Send <strong>{amountDisplay(payment.amount,payment.asset)} {payment.asset}</strong> to the address below</h2>
+        <div className="reference-qr"><div className="reference-qr-frame"><QrCode value={payment.address}/><div className="reference-qr-brand"><Image src="/assets/flowpay-mark.svg" width={40} height={40} alt="FlowPay"/></div></div></div>
+        <div className="reference-address" title={payment.address}><code>{shortAddress(payment.address)}</code><button type="button" onClick={()=>void copy()} aria-label="Copy payment address"><CopyIcon/></button></div>
+        {copied?<span className="reference-copied" role="status">Address copied</span>:null}
+        <div className="reference-warning"><InfoIcon/><p><strong>Only send {payment.asset} on {network.label}.</strong><span>Other assets or networks may be lost.</span></p></div>
+        <div className={`reference-status status-${status.toLowerCase()}`} role="status" aria-live="polite"><span>{isDone?<CheckIcon/>:<ClockIcon/>}</span><p><strong>{statusTitle}</strong><small>{statusText}{deposits.length>0&&status==="PARTIALLY_PAID"?` ${deposits.length} deposits detected.`:""}</small></p></div>
+      </div></div>
 
-    <section className="checkout-card desktop-checkout live-desktop-checkout" aria-labelledby="payment-title">
-      <div className="merchant-block">
-        <div className="merchant-icon"><Image src="/assets/storefront.svg" width={78} height={78} alt="" priority/></div>
-        <span>Pay to</span>
-        <h1 id="payment-title">{merchantName(payment)}</h1>
-      </div>
-
-      <div className="soft-divider"/>
-
-      <div className="amount-block">
-        <span className="eyebrow">Amount</span>
-        <div className="fiat-like">{dollarDisplay(payment.amount,payment.asset)}</div>
-        <div className="asset-line"><Image src={tokenIcon(payment.asset)} width={25} height={25} alt=""/><strong>{payment.amount} {payment.asset}</strong></div>
-      </div>
-
-      <div className="network-section">
-        <span className="eyebrow">Network</span>
-        <div className="network-pill"><Image src={network.asset} width={31} height={31} alt=""/><strong>{network.label}</strong><span className="verified-dot">Verified</span></div>
-      </div>
-
-      <div className="qr-wrap">
-        <div className="qr-frame">
-          <QrCode value={payment.address}/>
-          <div className="qr-brand"><Image src="/assets/flowpay-mark.svg" width={44} height={44} alt="FlowPay"/></div>
-        </div>
-      </div>
-
-      <div className="address-row" title={payment.address}>
-        <code>{shortAddress(payment.address)}</code>
-        <button type="button" onClick={()=>void copy()} aria-label="Copy payment address"><CopyIcon/>{copied?"Copied":"Copy"}</button>
-      </div>
-
-      <div className="notice-row">
-        <div className="round-icon"><InfoIcon/></div>
-        <div><strong>Send only {payment.asset} on {network.label}</strong><span>Sending any other asset or network may prevent this order from completing automatically.</span></div>
-      </div>
-
-      <div className={`status-row status-${status.toLowerCase()}`}>
-        <div className="round-icon">{isDone?<CheckIcon/>:<ClockIcon/>}</div>
-        <div>
-          <strong>{statusTitle}</strong>
-          <span>{statusText}{status==="WAITING"&&remaining>0?<> This invoice expires in <b>{time}</b>.</>:null}</span>
-          {deposits.length>0&&status==="PARTIALLY_PAID"?<small>{deposits.length} deposit{deposits.length===1?"":"s"} detected so far.</small>:null}
-        </div>
-      </div>
-
-      {canClaim?<div className="checkout-help-grid checkout-help-single">
-        <a href={`/claim?payment_id=${encodeURIComponent(payment.id)}`} className="help-tile">
-          <div className="round-icon"><LifebuoyIcon/></div>
-          <div><strong>Payment problem?</strong><span>If you sent the wrong asset or network, you can try to recover your funds.</span><b>Recover funds <ArrowRightIcon/></b></div>
-        </a>
-      </div>:null}
-
-      {isDone?<div className="complete-panel" role="status" aria-live="assertive"><div className="complete-check"><CheckIcon/></div><div><strong>Payment successful</strong><span>The merchant has been notified. Opening your confirmation…</span></div></div>:null}
     </section>
 
-    <footer className="public-footer">
-      <span><LockIcon/> Secured by FlowPay</span>
-      <nav><a href="#">Terms</a><a href="#">Privacy</a><a href="mailto:support@flowpay.dev">Support</a></nav>
-    </footer>
+    {showSuccess?<div className="payment-success-backdrop" role="presentation">
+      <section className="payment-success-modal" role="dialog" aria-modal="true" aria-labelledby="payment-success-title" aria-describedby="payment-success-copy">
+        <div className="payment-success-check"><CheckIcon/><i/><i/><i/><i/></div>
+        <h2 id="payment-success-title">Payment received!</h2>
+        <p id="payment-success-copy">{payment.amount} {payment.asset} was received and confirmed on-chain.</p>
+        <div className="payment-success-summary">
+          <span>Amount <strong>{payment.amount} {payment.asset}</strong></span>
+          <span>Network <strong>{network.label}</strong></span>
+          <span>Payment ID <strong>{payment.id}</strong></span>
+        </div>
+        <button type="button" onClick={()=>window.location.replace(`/pay/${encodeURIComponent(paymentId)}/success`)}>View confirmation</button>
+        <small>Redirecting securely…</small>
+      </section>
+    </div>:null}
+
+    <footer className="reference-footer"><a href="/"><ArrowLeftIcon/>Cancel payment</a><a href="mailto:support@flowpay.dev"><HeadphonesIcon/>Contact support</a></footer>
+    {canClaim?<a className="checkout-claim-fab" href={`/claim?payment_id=${encodeURIComponent(payment.id)}`} aria-label="Create a recovery claim"><LifebuoyIcon/><span>Create a claim</span><i/></a>:null}
+
+    {/* Agent support chat widget */}
+    {chatOpen?<div className="agent-chat-backdrop" onClick={()=>setChatOpen(false)}/>:null}
+    {chatOpen?<div className="agent-chat-panel">
+      <div className="agent-chat-header">
+        <h3>FlowPay Support Agent</h3>
+        <small>Powered by AI</small>
+      </div>
+      <div className="agent-chat-messages">
+        {chatMessages.map((msg,i)=><div key={i} className={`agent-chat-msg ${msg.role}`}>{msg.content}</div>)}
+        {chatLoading?<div className="agent-chat-msg agent" style={{opacity:.6}}>Thinking...</div>:null}
+      </div>
+      <div className="agent-chat-input">
+        <input type="text" value={chatInput} onChange={e=>setChatInput(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")void sendChat()}} placeholder="Type your message..." disabled={chatLoading}/>
+        <button type="button" onClick={()=>void sendChat()} disabled={!chatInput.trim()||chatLoading}>Send</button>
+      </div>
+    </div>:null}
+    <button type="button" className={`agent-chat-fab${chatOpen?" agent-chat-fab-close":""}`} onClick={()=>chatOpen?setChatOpen(false):openChat()} aria-label="Support agent">
+      {chatOpen?<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>:<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>}
+    </button>
   </main>;
 }

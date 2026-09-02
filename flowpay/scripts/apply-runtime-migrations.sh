@@ -12,3 +12,8 @@ cursor_key="$(psql "$DATABASE_URL" -Atc "SELECT pg_get_constraintdef(oid) FROM p
 if [[ "$cursor_key" != *"payment_id, chain"* ]]; then
   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f backend/database/migrations/0009_chain_aware_monitoring.sql
 fi
+
+approval_constraint="$(psql "$DATABASE_URL" -Atc "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname='approvals_status_check' AND conrelid='approvals'::regclass")"
+if [[ "$approval_constraint" != *"EXECUTING"* ]]; then
+  psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f backend/database/migrations/0010_security_hardening.sql
+fi

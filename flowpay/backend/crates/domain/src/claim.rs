@@ -73,6 +73,7 @@ impl ClaimState {
                 | (S::Investigating, S::NotRecoverable)
                 | (S::Investigating, S::Escalated)
                 | (S::NeedsMoreEvidence, S::AwaitingEvidence)
+                | (S::NeedsMoreEvidence, S::Investigating)
                 | (S::NeedsMoreEvidence, S::Escalated)
                 | (S::Recoverable, S::ApprovalPending)
                 | (S::Recoverable, S::Escalated)
@@ -80,6 +81,9 @@ impl ClaimState {
                 | (S::ApprovalPending, S::Escalated)
                 | (S::RecoveryPending, S::Recovered)
                 | (S::RecoveryPending, S::Escalated)
+                | (S::Escalated, S::Investigating)
+                | (S::Escalated, S::ApprovalPending)
+                | (S::Escalated, S::RecoveryPending)
         )
     }
 
@@ -99,5 +103,13 @@ mod tests {
         assert!(!ClaimState::Recoverable.can_transition_to(ClaimState::RecoveryPending));
         assert!(ClaimState::Recoverable.can_transition_to(ClaimState::ApprovalPending));
         assert!(ClaimState::ApprovalPending.can_transition_to(ClaimState::RecoveryPending));
+    }
+
+    #[test]
+    fn escalated_claim_can_retry_after_dependency_repair() {
+        assert!(ClaimState::Escalated.can_transition_to(ClaimState::Investigating));
+        assert!(ClaimState::Escalated.can_transition_to(ClaimState::ApprovalPending));
+        assert!(ClaimState::Escalated.can_transition_to(ClaimState::RecoveryPending));
+        assert!(ClaimState::NeedsMoreEvidence.can_transition_to(ClaimState::Investigating));
     }
 }

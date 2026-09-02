@@ -74,7 +74,8 @@ impl PaymentState {
             (self, to),
             (S::Created, S::Waiting)
                 | (S::Created, S::Cancelled)
-                | (S::Waiting, S::Detected)
+                |            (S::Waiting, S::Detected)
+                | (S::Waiting, S::Confirmed) // direct webhook confirmation
                 | (S::Waiting, S::Expired)
                 | (S::Waiting, S::Cancelled)
                 | (S::Waiting, S::ClaimPending)
@@ -88,7 +89,8 @@ impl PaymentState {
                 | (S::Confirming, S::Overpaid)
                 | (S::Confirming, S::Confirmed)
                 | (S::Confirming, S::Failed)
-                | (S::PartiallyPaid, S::Detected)
+                |            (S::PartiallyPaid, S::Detected)
+                | (S::PartiallyPaid, S::Confirmed) // direct webhook confirmation
                 | (S::PartiallyPaid, S::Waiting) // reorg removed confirmed partial deposits
                 | (S::PartiallyPaid, S::Expired)
                 | (S::PartiallyPaid, S::ClaimPending)

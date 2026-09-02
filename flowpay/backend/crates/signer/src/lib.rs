@@ -5,7 +5,7 @@ use flowpay_chains::PreparedTransaction;
 use flowpay_domain::{ApprovalId, AtomicAmount, ChainKey, RecoveryPlanId};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{collections::BTreeSet, str::FromStr};
+use std::collections::BTreeSet;
 use thiserror::Error;
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
@@ -84,7 +84,7 @@ pub struct SignerPolicy {
 pub struct RecoveryIntent {
     pub chain: ChainKey,
     pub salt: [u8; 32],
-    pub token: String,
+    pub token: Option<String>,
     pub destination: String,
     pub amount: AtomicAmount,
 }
@@ -100,26 +100,10 @@ fn decode_address(word: &[u8]) -> Option<String> {
 }
 
 fn decode_amount(word: &[u8]) -> Result<AtomicAmount, SignerError> {
-    AtomicAmount::from_str(
-        &hex::encode(word)
-            .trim_start_matches('0')
-            .to_owned()
-            .if_empty_then_zero(),
-    )
-    .map_err(|_| SignerError::CalldataMismatch)
-}
-
-trait EmptyAsZero {
-    fn if_empty_then_zero(self) -> String;
-}
-impl EmptyAsZero for String {
-    fn if_empty_then_zero(self) -> String {
-        if self.is_empty() {
-            "0".into()
-        } else {
-            self
-        }
-    }
+    let encoded = hex::encode(word);
+    let quantity = encoded.trim_start_matches('0');
+    AtomicAmount::from_hex_quantity(if quantity.is_empty() { "0" } else { quantity })
+        .map_err(|_| SignerError::CalldataMismatch)
 }
 
 fn validate_recovery_calldata(
@@ -131,23 +115,43 @@ fn validate_recovery_calldata(
     }
     let data = hex::decode(request.transaction.calldata_hex.trim_start_matches("0x"))
         .map_err(|_| SignerError::CalldataMismatch)?;
-    let selector = &keccak256("recoverToken(bytes32,address,address,uint256)".as_bytes())[..4];
-    if data.len() != 4 + 32 * 4 || data.get(..4) != Some(selector) {
+    let token_selector =
+        &keccak256("recoverToken(bytes32,address,address,uint256)".as_bytes())[..4];
+    let native_selector = &keccak256("recoverNative(bytes32,address,uint256)".as_bytes())[..4];
+    let erc20 = request.transaction_class == TransactionClass::RecoverErc20;
+    let expected_len = if erc20 { 4 + 32 * 4 } else { 4 + 32 * 3 };
+    let expected_selector = if erc20 {
+        token_selector
+    } else {
+        native_selector
+    };
+    if data.len() != expected_len || data.get(..4) != Some(expected_selector) {
         return Err(SignerError::CalldataMismatch);
     }
     let salt = decode_word(&data, 0).ok_or(SignerError::CalldataMismatch)?;
     if salt != intent.salt {
         return Err(SignerError::CalldataMismatch);
     }
-    let token = decode_address(decode_word(&data, 1).ok_or(SignerError::CalldataMismatch)?)
-        .ok_or(SignerError::CalldataMismatch)?;
-    let destination = decode_address(decode_word(&data, 2).ok_or(SignerError::CalldataMismatch)?)
-        .ok_or(SignerError::CalldataMismatch)?;
-    let amount = decode_amount(decode_word(&data, 3).ok_or(SignerError::CalldataMismatch)?)?;
-    if !token.eq_ignore_ascii_case(&intent.token)
-        || !destination.eq_ignore_ascii_case(&intent.destination)
-        || amount != intent.amount
-    {
+    let (destination_index, amount_index) = if erc20 { (2, 3) } else { (1, 2) };
+    if erc20 {
+        let token = decode_address(decode_word(&data, 1).ok_or(SignerError::CalldataMismatch)?)
+            .ok_or(SignerError::CalldataMismatch)?;
+        if !intent
+            .token
+            .as_deref()
+            .is_some_and(|expected| token.eq_ignore_ascii_case(expected))
+        {
+            return Err(SignerError::CalldataMismatch);
+        }
+    } else if intent.token.is_some() {
+        return Err(SignerError::CalldataMismatch);
+    }
+    let destination =
+        decode_address(decode_word(&data, destination_index).ok_or(SignerError::CalldataMismatch)?)
+            .ok_or(SignerError::CalldataMismatch)?;
+    let amount =
+        decode_amount(decode_word(&data, amount_index).ok_or(SignerError::CalldataMismatch)?)?;
+    if !destination.eq_ignore_ascii_case(&intent.destination) || amount != intent.amount {
         return Err(SignerError::CalldataMismatch);
     }
     Ok(())
@@ -183,7 +187,10 @@ impl SignerPolicy {
         {
             return Err(SignerError::UnexpectedValue);
         }
-        if request.transaction_class == TransactionClass::RecoverErc20 {
+        if matches!(
+            request.transaction_class,
+            TransactionClass::RecoverErc20 | TransactionClass::RecoverNative
+        ) {
             let intent = request
                 .recovery_intent
                 .as_ref()
@@ -493,5 +500,80 @@ mod tests {
             policy.validate(&request),
             Err(SignerError::WrongTarget)
         ));
+    }
+
+    fn recovery_request(class: TransactionClass, token: Option<&str>) -> ApprovedSignerRequest {
+        let salt = [7_u8; 32];
+        let destination = "0x2222222222222222222222222222222222222222";
+        let amount = AtomicAmount::from_str("900").unwrap();
+        let signature = if token.is_some() {
+            "recoverToken(bytes32,address,address,uint256)"
+        } else {
+            "recoverNative(bytes32,address,uint256)"
+        };
+        let mut calldata = Vec::new();
+        calldata.extend_from_slice(&keccak256(signature.as_bytes())[..4]);
+        calldata.extend_from_slice(&salt);
+        if let Some(token) = token {
+            calldata.extend_from_slice(&encode_test_address(token));
+        }
+        calldata.extend_from_slice(&encode_test_address(destination));
+        let mut amount_word = [0_u8; 32];
+        amount_word[30..].copy_from_slice(&900_u16.to_be_bytes());
+        calldata.extend_from_slice(&amount_word);
+        ApprovedSignerRequest {
+            plan_id: RecoveryPlanId::new(),
+            approval_id: ApprovalId::new(),
+            approved_plan_hash: "plan".into(),
+            computed_plan_hash: "plan".into(),
+            approval_reserved_for_execution: true,
+            transaction_class: class,
+            transaction: PreparedTransaction {
+                transaction_class: signature.into(),
+                chain: ChainKey::Bsc,
+                to: "0xfac".into(),
+                value: AtomicAmount::zero(),
+                calldata_hex: format!("0x{}", hex::encode(calldata)),
+            },
+            expected_factory: "0xfac".into(),
+            recovery_intent: Some(RecoveryIntent {
+                chain: ChainKey::Bsc,
+                salt,
+                token: token.map(str::to_owned),
+                destination: destination.into(),
+                amount,
+            }),
+        }
+    }
+
+    fn encode_test_address(address: &str) -> [u8; 32] {
+        let bytes = hex::decode(address.trim_start_matches("0x")).unwrap();
+        let mut word = [0_u8; 32];
+        word[12..].copy_from_slice(&bytes);
+        word
+    }
+
+    #[test]
+    fn binds_erc20_and_native_recovery_calldata_to_intent() {
+        for request in [
+            recovery_request(
+                TransactionClass::RecoverErc20,
+                Some("0x1111111111111111111111111111111111111111"),
+            ),
+            recovery_request(TransactionClass::RecoverNative, None),
+        ] {
+            let policy = SignerPolicy {
+                allowed_classes: [request.transaction_class.clone()].into_iter().collect(),
+                factory_address: "0xfac".into(),
+            };
+            assert!(policy.validate(&request).is_ok());
+            let mut changed = request;
+            changed.recovery_intent.as_mut().unwrap().amount =
+                AtomicAmount::from_str("901").unwrap();
+            assert!(matches!(
+                policy.validate(&changed),
+                Err(SignerError::CalldataMismatch)
+            ));
+        }
     }
 }

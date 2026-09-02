@@ -1901,6 +1901,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "sqlx",
+ "subtle",
  "thiserror 2.0.20",
  "time",
  "tokio",
@@ -1914,6 +1915,7 @@ dependencies = [
 name = "flowpay-signer"
 version = "0.2.0"
 dependencies = [
+ "alloy-primitives",
  "async-trait",
  "ethers-core",
  "ethers-signers",

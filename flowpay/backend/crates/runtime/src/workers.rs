@@ -1,7 +1,4 @@
-use crate::{
-    agent_runtime::DatabaseAgentTools,
-    state::{AppState, ChainRuntime},
-};
+use crate::{agent_runtime::DatabaseAgentTools, state::AppState};
 use flowpay_chains::ChainAdapter;
 use flowpay_domain::{AddressRef, AtomicAmount, ChainKey, Payment, PaymentState};
 use flowpay_messaging::{
@@ -121,7 +118,51 @@ async fn handle_command(
         }
     }
     let result = match envelope.event_type.as_str() {
-        "payment.monitor.start" | "payment.reconcile" => payment_monitor_tick(state).await,
+        "payment.monitor.start" => payment_monitor_tick(state).await,
+        "payment.reconcile" => {
+            // If this reconcile was triggered by an Alchemy webhook, fetch the
+            // original payload and process it directly (skip DETECTED/CONFIRMING).
+            if envelope
+                .payload
+                .pointer("/provider")
+                .and_then(Value::as_str)
+                == Some("alchemy")
+            {
+                if let Some(event_id) = envelope
+                    .payload
+                    .pointer("/event_id")
+                    .and_then(Value::as_str)
+                {
+                    match sqlx::query_scalar::<_, Value>(
+                        "SELECT payload FROM provider_webhook_events WHERE event_id=$1",
+                    )
+                    .bind(event_id)
+                    .fetch_optional(state.store.pool())
+                    .await
+                    {
+                        Ok(Some(payload)) => match process_alchemy_webhook(state, &payload).await {
+                            Ok(()) => Ok(()),
+                            Err(e) => {
+                                warn!(error=%e, "Alchemy webhook processing failed; falling back to monitor");
+                                payment_monitor_tick(state).await
+                            }
+                        },
+                        Ok(None) => {
+                            warn!(event_id=%event_id, "Alchemy webhook event not found; falling back to monitor");
+                            payment_monitor_tick(state).await
+                        }
+                        Err(e) => {
+                            warn!(error=%e, "Failed to fetch Alchemy webhook event; falling back to monitor");
+                            payment_monitor_tick(state).await
+                        }
+                    }
+                } else {
+                    payment_monitor_tick(state).await
+                }
+            } else {
+                payment_monitor_tick(state).await
+            }
+        }
         "payment.settlement.execute" => settlement_tick(state).await,
         "claim.investigate" | "recovery.simulate" | "recovery.execute" | "recovery.verify" => {
             agent_tick(state).await
@@ -142,164 +183,6 @@ async fn handle_command(
             Err(MessagingError::Rabbit(message))
         }
     }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum DepositRevalidation {
-    Stable,
-    Reorged,
-    Unavailable,
-}
-
-async fn revalidate_persisted_deposits(
-    state: &AppState,
-    payment: &Payment,
-    chain: &ChainKey,
-    runtime: &ChainRuntime,
-) -> anyhow::Result<DepositRevalidation> {
-    let rows = sqlx::query(
-        "SELECT tx_hash, observed_block_hash FROM deposits WHERE payment_id=$1 AND chain=$2 AND confirmation_status<>'ORPHANED' ORDER BY created_at,id",
-    )
-    .bind(payment.id.0)
-    .bind(chain.to_string())
-    .fetch_all(state.store.pool())
-    .await?;
-
-    let mut reorged = false;
-    for row in rows {
-        let tx_hash: String = row.try_get("tx_hash")?;
-        let observed_block_hash: String = row.try_get("observed_block_hash")?;
-        let receipt = match runtime.adapter.receipt(&tx_hash).await {
-            Ok(receipt) => receipt,
-            Err(flowpay_chains::ChainError::TransactionNotFound) => {
-                mark_deposit_orphaned(state, payment, chain, &tx_hash).await?;
-                reorged = true;
-                continue;
-            }
-            Err(e) => {
-                warn!(payment_id=%payment.id.0, tx_hash=%tx_hash, error=%e, "deposit canonicality could not be revalidated");
-                return Ok(DepositRevalidation::Unavailable);
-            }
-        };
-
-        if !receipt.success
-            || !receipt
-                .block_hash
-                .eq_ignore_ascii_case(&observed_block_hash)
-        {
-            mark_deposit_orphaned(state, payment, chain, &tx_hash).await?;
-            reorged = true;
-            continue;
-        }
-
-        let confirmation = match runtime
-            .adapter
-            .confirmation_status(
-                receipt.block_number,
-                &receipt.block_hash,
-                payment.required_confirmations,
-            )
-            .await
-        {
-            Ok(value) => value,
-            Err(flowpay_chains::ChainError::NonCanonical) => {
-                mark_deposit_orphaned(state, payment, chain, &tx_hash).await?;
-                reorged = true;
-                continue;
-            }
-            Err(e) => {
-                warn!(payment_id=%payment.id.0, tx_hash=%tx_hash, error=%e, "deposit confirmation status unavailable during canonicality check");
-                return Ok(DepositRevalidation::Unavailable);
-            }
-        };
-
-        sqlx::query(
-            "UPDATE deposits SET confirmation_status=$4,confirmations=$5,observed_block_number=$6::numeric,observed_block_hash=$7,updated_at=now() WHERE payment_id=$1 AND chain=$2 AND tx_hash=$3 AND confirmation_status<>'ORPHANED'",
-        )
-        .bind(payment.id.0)
-        .bind(chain.to_string())
-        .bind(&tx_hash)
-        .bind(if confirmation.final_enough { "FINAL" } else { "CONFIRMING" })
-        .bind(i32::try_from(confirmation.confirmations).unwrap_or(i32::MAX))
-        .bind(receipt.block_number.to_string())
-        .bind(&receipt.block_hash)
-        .execute(state.store.pool())
-        .await?;
-        sqlx::query(
-            "UPDATE chain_transactions SET block_number=$3::numeric,block_hash=$4,tx_status='SUCCESS',canonical=true,verified_at=now() WHERE chain=$1 AND tx_hash=$2",
-        )
-        .bind(chain.to_string())
-        .bind(&tx_hash)
-        .bind(receipt.block_number.to_string())
-        .bind(&receipt.block_hash)
-        .execute(state.store.pool())
-        .await?;
-    }
-
-    Ok(if reorged {
-        DepositRevalidation::Reorged
-    } else {
-        DepositRevalidation::Stable
-    })
-}
-
-async fn mark_deposit_orphaned(
-    state: &AppState,
-    payment: &Payment,
-    chain: &ChainKey,
-    tx_hash: &str,
-) -> anyhow::Result<()> {
-    sqlx::query(
-        "UPDATE deposits SET confirmation_status='ORPHANED',updated_at=now() WHERE payment_id=$1 AND chain=$2 AND tx_hash=$3 AND confirmation_status<>'ORPHANED'",
-    )
-    .bind(payment.id.0)
-    .bind(chain.to_string())
-    .bind(tx_hash)
-    .execute(state.store.pool())
-    .await?;
-    sqlx::query(
-        "UPDATE chain_transactions SET canonical=false,verified_at=now() WHERE chain=$1 AND tx_hash=$2",
-    )
-    .bind(chain.to_string())
-    .bind(tx_hash)
-    .execute(state.store.pool())
-    .await?;
-    warn!(payment_id=%payment.id.0, chain=%chain, tx_hash=%tx_hash, "persisted deposit marked orphaned after canonicality revalidation");
-    Ok(())
-}
-
-async fn rewind_payment_after_reorg(state: &AppState, payment: &Payment) -> anyhow::Result<()> {
-    match payment.state {
-        PaymentState::Confirmed | PaymentState::Overpaid => {
-            state
-                .store
-                .set_payment_state(
-                    payment.id,
-                    PaymentState::Confirming,
-                    "canonical_deposit_reorged",
-                    Some(&payment.expected_chain),
-                    None,
-                )
-                .await?;
-        }
-        PaymentState::Settling => {
-            // A reorg racing an already-started settlement is no longer safe to auto-rewind.
-            // Stop the automatic path and require operator inspection instead of risking a
-            // second settlement attempt against an uncertain canonical history.
-            state
-                .store
-                .set_payment_state(
-                    payment.id,
-                    PaymentState::Failed,
-                    "reorg_during_settlement",
-                    Some(&payment.expected_chain),
-                    None,
-                )
-                .await?;
-        }
-        _ => {}
-    }
-    Ok(())
 }
 
 async fn payment_monitor_tick(state: &AppState) -> anyhow::Result<()> {
@@ -338,26 +221,7 @@ async fn payment_monitor_tick(state: &AppState) -> anyhow::Result<()> {
                     .await;
                 continue;
             }
-            match revalidate_persisted_deposits(state, &payment, chain, runtime).await? {
-                DepositRevalidation::Reorged => {
-                    // A reorg on a non-expected chain only invalidates that chain's
-                    // observation; it must not rewind a valid expected-chain payment.
-                    if *chain == payment.expected_chain {
-                        rewind_payment_after_reorg(state, &payment).await?;
-                        payment = state.store.get_payment_by_id(payment.id).await?;
-                    }
-                }
-                DepositRevalidation::Unavailable
-                    if matches!(
-                        payment.state,
-                        PaymentState::Confirmed | PaymentState::Overpaid | PaymentState::Settling
-                    ) =>
-                {
-                    // Never advance a value-moving state while canonicality cannot be independently checked.
-                    continue;
-                }
-                DepositRevalidation::Stable | DepositRevalidation::Unavailable => {}
-            }
+
             // Every configured chain must be scanned, even after an expected-chain
             // deposit was confirmed. A later transfer on another chain/token is an
             // exception and must be persisted for claim investigation.
@@ -408,7 +272,6 @@ async fn payment_monitor_tick(state: &AppState) -> anyhow::Result<()> {
                 {
                     Ok(v) => v,
                     Err(flowpay_chains::ChainError::NonCanonical) => {
-                        mark_deposit_orphaned(state, &payment, chain, &transfer.tx_hash).await?;
                         continue;
                     }
                     Err(e) => {
@@ -560,11 +423,10 @@ async fn payment_monitor_tick(state: &AppState) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[allow(dead_code)]
-pub(crate) async fn process_alchemy_webhook(
-    state: &AppState,
-    payload: &Value,
-) -> anyhow::Result<()> {
+/// Process an Alchemy webhook: record the deposit and move the payment directly
+/// to CONFIRMED (or WRONG_ASSET). This skips the intermediate DETECTED/CONFIRMING
+/// states because Alchemy webhooks already carry verified on-chain data.
+async fn process_alchemy_webhook(state: &AppState, payload: &Value) -> anyhow::Result<()> {
     let network = payload
         .pointer("/event/network")
         .and_then(Value::as_str)
@@ -600,7 +462,7 @@ pub(crate) async fn process_alchemy_webhook(
             continue;
         };
         let rows = sqlx::query(
-            "SELECT DISTINCT p.id FROM payments p JOIN checkout_addresses c ON c.payment_id=p.id WHERE c.chain=$1 AND lower(c.address)=lower($2) AND p.state IN ('WAITING','DETECTED','CONFIRMING','PARTIALLY_PAID','OVERPAID','WRONG_ASSET')",
+            "SELECT p.id FROM payments p JOIN checkout_addresses c ON c.payment_id=p.id WHERE c.chain=$1 AND lower(c.address)=lower($2) AND p.state IN ('WAITING','DETECTED','CONFIRMING','PARTIALLY_PAID','OVERPAID','WRONG_ASSET')",
         )
         .bind(chain.to_string())
         .bind(address)
@@ -650,7 +512,7 @@ pub(crate) async fn process_alchemy_webhook(
         };
         for row in rows {
             let payment_id = flowpay_domain::PaymentId(row.try_get("id")?);
-            let mut payment = state.store.get_payment_by_id(payment_id).await?;
+            let payment = state.store.get_payment_by_id(payment_id).await?;
             let contract_matches = match (
                 payment.expected_asset.token_contract.as_deref(),
                 token_contract.as_deref(),
@@ -692,7 +554,6 @@ pub(crate) async fn process_alchemy_webhook(
                     &format!("alchemy-notify:{network}:{block_number}"),
                 )
                 .await?;
-            move_to_detected(state, &mut payment).await?;
             if !payments.contains(&payment_id) {
                 payments.push(payment_id);
             }
@@ -702,74 +563,76 @@ pub(crate) async fn process_alchemy_webhook(
         return Ok(());
     }
 
+    // After recording all deposits, move each payment directly to CONFIRMED
+    // or WRONG_ASSET. No intermediate DETECTED/CONFIRMING states.
     for payment_id in payments {
         reconcile_webhook_payment(state, payment_id, &chain).await?;
     }
     Ok(())
 }
 
-#[allow(dead_code)]
+/// Reconcile a webhook-triggered payment directly to CONFIRMED or WRONG_ASSET.
+/// All deposits from Alchemy webhooks are already marked FINAL — no
+/// intermediate DETECTED/CONFIRMING states needed.
 async fn reconcile_webhook_payment(
     state: &AppState,
     payment_id: flowpay_domain::PaymentId,
     chain: &ChainKey,
 ) -> anyhow::Result<()> {
-    let mut payment = state.store.get_payment_by_id(payment_id).await?;
-    let deposits = state.store.payment_deposits(payment_id).await?;
-    if deposits
-        .iter()
-        .any(|deposit| deposit.classification == "EXPECTED_ASSET")
-        && payment.state == PaymentState::Detected
-    {
-        state
-            .store
-            .set_payment_state(
-                payment.id,
-                PaymentState::Confirming,
-                "alchemy_webhook_received",
-                Some(chain),
-                None,
-            )
-            .await?;
-        payment = state.store.get_payment_by_id(payment.id).await?;
+    let payment = state.store.get_payment_by_id(payment_id).await?;
+    // Skip terminal states — already handled.
+    if payment.state.is_terminal() {
+        return Ok(());
     }
-    let observed = deposits
-        .into_iter()
-        .map(|deposit| ObservedDeposit {
-            chain: deposit.chain.to_string(),
-            tx_hash: deposit.tx_hash,
-            asset_symbol: deposit.asset_symbol,
-            token_contract: deposit.token_contract,
-            amount: deposit.amount,
-            final_enough: true,
-        })
-        .collect();
-    let result = reconcile(&ReconciliationInput {
-        expected_chain: payment.expected_chain.to_string(),
-        expected_asset_symbol: payment.expected_asset.symbol.clone(),
-        expected_token_contract: payment.expected_asset.token_contract.clone(),
-        expected_amount: payment.expected_amount.clone(),
-        current_state: payment.state,
-        overpayment_policy: payment.overpayment_policy.clone(),
-        deposits: observed,
-    })?;
-    if result.next_state != payment.state && payment.state.can_transition_to(result.next_state) {
-        state
-            .store
-            .set_payment_state(
-                payment.id,
-                result.next_state,
-                &result.reason_code,
-                Some(chain),
-                None,
-            )
-            .await?;
-        emit_payment_event(state, &payment, result.next_state, &result.reason_code).await?;
+    let deposits = state.store.payment_deposits(payment_id).await?;
+    let has_expected = deposits
+        .iter()
+        .any(|d| d.classification == "EXPECTED_ASSET" && d.confirmation_status != "ORPHANED");
+    let has_wrong = deposits
+        .iter()
+        .any(|d| d.classification != "EXPECTED_ASSET" && d.confirmation_status != "ORPHANED");
+
+    if has_expected {
+        // Direct path: Webhook says it's received → treat as confirmed immediately.
+        // No DETECTED, no CONFIRMING, no waiting for extra block confirmations.
+        let target = if has_wrong {
+            PaymentState::ClaimPending
+        } else {
+            PaymentState::Confirmed
+        };
+        if payment.state != target && payment.state.can_transition_to(target) {
+            let reason = if has_wrong {
+                "mixed_assets_requires_review"
+            } else {
+                "webhook_received_confirmed"
+            };
+            state
+                .store
+                .set_payment_state(payment.id, target, reason, Some(chain), None)
+                .await?;
+            let refreshed = state.store.get_payment_by_id(payment.id).await?;
+            emit_payment_event(state, &refreshed, target, reason).await?;
+        }
+    } else if has_wrong {
+        // Only wrong-asset deposits — move to WRONG_ASSET so the user can open a claim.
+        if payment.state != PaymentState::WrongAsset
+            && payment.state.can_transition_to(PaymentState::WrongAsset)
+        {
+            state
+                .store
+                .set_payment_state(
+                    payment.id,
+                    PaymentState::WrongAsset,
+                    "webhook_wrong_asset",
+                    Some(chain),
+                    None,
+                )
+                .await?;
+        }
     }
     Ok(())
 }
 
-#[allow(dead_code)]
 fn parse_hex_u64(value: &str) -> Option<u64> {
     u64::from_str_radix(value.strip_prefix("0x").unwrap_or(value), 16).ok()
 }
@@ -843,22 +706,6 @@ async fn settlement_tick_inner(state: &AppState) -> anyhow::Result<()> {
             continue;
         };
 
-        // Settlement is consequential. Re-check every persisted deposit immediately before
-        // simulating/signing so a disappeared log or block-hash change cannot be settled.
-        match revalidate_persisted_deposits(state, &payment, &payment.expected_chain, runtime)
-            .await?
-        {
-            DepositRevalidation::Stable => {}
-            DepositRevalidation::Reorged => {
-                rewind_payment_after_reorg(state, &payment).await?;
-                warn!(payment_id=%payment.id.0,"settlement withheld because a deposit was orphaned");
-                continue;
-            }
-            DepositRevalidation::Unavailable => {
-                warn!(payment_id=%payment.id.0,"settlement withheld because deposit canonicality is temporarily unavailable");
-                continue;
-            }
-        }
         let has_exception_deposit: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM deposits WHERE payment_id=$1 AND confirmation_status<>'ORPHANED' AND classification<>'EXPECTED_ASSET')",
         )

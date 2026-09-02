@@ -12,8 +12,7 @@ use flowpay_domain::{
 };
 use flowpay_policy::{RecoveryPolicy, SupportedAsset};
 use flowpay_recovery::{
-    build_live_recover_erc20_transaction, build_plan, with_simulation, HashedRecoveryPlan,
-    RecoveryFacts,
+    build_live_recovery_transaction, build_plan, with_simulation, HashedRecoveryPlan, RecoveryFacts,
 };
 use flowpay_signer::{
     ApprovedSignerRequest, DevUnlockedSigner, RestrictedSigner, SignerPolicy, TestnetKeySigner,
@@ -244,11 +243,11 @@ impl InvestigationTools for DatabaseAgentTools {
             factory_verified: factory.recovery_capable,
         })
     }
-    async fn get_token_balance(
+    async fn get_asset_balance(
         &self,
         _ctx: &AgentContext,
         chain: ChainKey,
-        token_contract: &str,
+        token_contract: Option<&str>,
         address: &str,
     ) -> Result<AtomicAmount, ToolError> {
         let runtime = self
@@ -256,11 +255,18 @@ impl InvestigationTools for DatabaseAgentTools {
             .chains
             .get(&chain)
             .ok_or_else(|| ToolError::Permanent("unsupported network".into()))?;
-        runtime
-            .adapter
-            .token_balance(token_contract, address)
-            .await
-            .map_err(chain_err)
+        match token_contract {
+            Some(token) => runtime
+                .adapter
+                .token_balance(token, address)
+                .await
+                .map_err(chain_err),
+            None => runtime
+                .adapter
+                .native_balance(address)
+                .await
+                .map_err(chain_err),
+        }
     }
 
     async fn build_recovery_plan(&self, ctx: &AgentContext) -> Result<RecoveryPlan, ToolError> {
@@ -285,10 +291,6 @@ impl InvestigationTools for DatabaseAgentTools {
             .as_deref()
             .ok_or_else(|| ToolError::InvalidInput("claim missing transaction hash".into()))?;
         let tx = self.verified_transfer(ctx, &chain, tx_hash).await?;
-        let token = tx
-            .token_contract
-            .clone()
-            .ok_or_else(|| ToolError::Permanent("native recovery is not enabled".into()))?;
         let runtime = self
             .state
             .chains
@@ -306,11 +308,18 @@ impl InvestigationTools for DatabaseAgentTools {
             .verify_factory(&runtime.factory)
             .await
             .map_err(chain_err)?;
-        let balance = runtime
-            .adapter
-            .token_balance(&token, &predicted)
-            .await
-            .map_err(chain_err)?;
+        let balance = match tx.token_contract.as_deref() {
+            Some(token) => runtime
+                .adapter
+                .token_balance(token, &predicted)
+                .await
+                .map_err(chain_err)?,
+            None => runtime
+                .adapter
+                .native_balance(&predicted)
+                .await
+                .map_err(chain_err)?,
+        };
         let ownership = self
             .state
             .store
@@ -326,22 +335,15 @@ impl InvestigationTools for DatabaseAgentTools {
         let minimum_gas = AtomicAmount::from_str("100000000000000")
             .map_err(|e| ToolError::Permanent(e.to_string()))?;
         let gas_sufficient = operator_balance >= minimum_gas;
-        let metadata = runtime
-            .adapter
-            .token_metadata(&token)
-            .await
-            .map_err(|error| {
-                let _ = error;
-                ToolError::Permanent(
-                    "unsupported token behavior: metadata could not be verified".into(),
-                )
-            })?;
-        let supported = self
-            .state
-            .store
-            .recovery_asset_by_contract(&chain, &token)
-            .await
-            .ok();
+        let (asset_symbol, asset_decimals) = match tx.token_contract.as_deref() {
+            Some(token) => {
+                let metadata = runtime.adapter.token_metadata(token).await.map_err(|_| {
+                    ToolError::Permanent("ERC-20 metadata could not be verified".into())
+                })?;
+                (metadata.symbol, metadata.decimals)
+            }
+            None => (native_symbol(&chain).into(), 18),
+        };
         let mut risk_flags = Vec::new();
         if chain != payment.expected_chain {
             risk_flags.push(RiskFlag::CrossChain);
@@ -363,19 +365,17 @@ impl InvestigationTools for DatabaseAgentTools {
         // Demo policy: return the full verified amount. Fee routing is intentionally
         // disabled until a treasury destination and atomic split transfer are configured.
         let recover_amount = gross_amount;
-        let supported_assets = supported.map_or_else(Vec::new, |a| {
-            vec![SupportedAsset {
-                chain: chain.clone(),
-                symbol: a.symbol,
-                token_contract: a.token_contract,
-            }]
-        });
+        let supported_assets = vec![SupportedAsset {
+            chain: chain.clone(),
+            symbol: asset_symbol.clone(),
+            token_contract: tx.token_contract.clone(),
+        }];
         let policy = RecoveryPolicy {
             version: "demo-v1".into(),
             supported_chains: BTreeSet::from([chain.to_string()]),
             supported_assets,
             minimum_recovery_amount: AtomicAmount::from_str("1").unwrap_or_default(),
-            maximum_demo_recovery_amount: AtomicAmount::from_decimal("1000", metadata.decimals)
+            maximum_demo_recovery_amount: AtomicAmount::from_decimal("1000", asset_decimals)
                 .map_err(|e| ToolError::Permanent(e.to_string()))?,
             require_self_custody_signature: true,
             require_simulation: true,
@@ -390,8 +390,8 @@ impl InvestigationTools for DatabaseAgentTools {
             claim_id: claim.id,
             payment_id: payment.id,
             source_chain: chain.clone(),
-            asset_symbol: metadata.symbol,
-            token_contract: Some(token),
+            asset_symbol,
+            token_contract: tx.token_contract,
             amount: recover_amount,
             checkout_address: AddressRef {
                 chain: chain.clone(),
@@ -452,7 +452,7 @@ impl InvestigationTools for DatabaseAgentTools {
             )
             .await
             .map_err(store_err)?;
-        let tx = build_live_recover_erc20_transaction(
+        let tx = build_live_recovery_transaction(
             &RecoveryPlan {
                 simulation_status: SimulationStatus::Succeeded,
                 ..plan.clone()
@@ -461,24 +461,22 @@ impl InvestigationTools for DatabaseAgentTools {
             &runtime.factory,
         )
         .map_err(|e| ToolError::Permanent(e.to_string()))?;
-        let before_destination = runtime
-            .adapter
-            .token_balance(
-                plan.token_contract
-                    .as_deref()
-                    .ok_or_else(|| ToolError::Permanent("token missing".into()))?,
+        let before_destination = self
+            .get_asset_balance(
+                ctx,
+                plan.source_chain.clone(),
+                plan.token_contract.as_deref(),
                 &plan.recovery_destination.value,
             )
-            .await
-            .map_err(chain_err)?;
-        let before_checkout = runtime
-            .adapter
-            .token_balance(
-                plan.token_contract.as_deref().unwrap(),
+            .await?;
+        let before_checkout = self
+            .get_asset_balance(
+                ctx,
+                plan.source_chain.clone(),
+                plan.token_contract.as_deref(),
                 &plan.checkout_address.value,
             )
-            .await
-            .map_err(chain_err)?;
+            .await?;
         let simulation = runtime.adapter.simulate(&tx).await.map_err(chain_err)?;
         let hashed = with_simulation(
             HashedRecoveryPlan {
@@ -578,23 +576,30 @@ impl ControlledRecoveryTools for DatabaseAgentTools {
                 .await
                 .map_err(store_err)?;
         }
+        let claimant = self
+            .state
+            .store
+            .wallet_authorization(claim.id)
+            .await
+            .map_err(store_err)?
+            .ok_or(ToolError::NotAuthorized)?;
         self.state
             .store
             .set_claim_state(
                 claim.id,
                 ClaimState::ApprovalPending,
-                "human_approval_required",
+                "claimant_authorization_verified",
                 "AGENT",
             )
             .await
             .map_err(store_err)?;
         let approval = ApprovalId::new();
         let nonce = Uuid::now_v7().simple().to_string();
-        sqlx::query("INSERT INTO approvals(id,public_id,claim_id,recovery_plan_id,plan_hash,status,approval_nonce,expires_at) VALUES($1,$2,$3,$4,$5,'PENDING',$6,$7)").bind(approval.0).bind(format!("apr_{}",approval.0.simple())).bind(claim.id.0).bind(plan.id.0).bind(&plan_hash).bind(nonce).bind(OffsetDateTime::now_utc()+Duration::minutes(15)).execute(self.state.store.pool()).await.map_err(db_err)?;
-        emit_claim_event(&self.state,claim.merchant_id,"claim.recoverable",&claim.public_id,json!({"claim_id":claim.public_id,"plan_id":format!("rpl_{}",plan.id.0.simple()),"estimated_gas":plan.estimated_gas_atomic,"simulation":"SUCCEEDED","approval_required":true})).await?;
+        sqlx::query("INSERT INTO approvals(id,public_id,claim_id,recovery_plan_id,plan_hash,status,approved_by,approval_nonce,expires_at,approved_at) VALUES($1,$2,$3,$4,$5,'APPROVED',$6,$7,$8,now())").bind(approval.0).bind(format!("apr_{}",approval.0.simple())).bind(claim.id.0).bind(plan.id.0).bind(&plan_hash).bind(format!("claimant:{claimant}")).bind(nonce).bind(OffsetDateTime::now_utc()+Duration::minutes(15)).execute(self.state.store.pool()).await.map_err(db_err)?;
+        emit_claim_event(&self.state,claim.merchant_id,"claim.recoverable",&claim.public_id,json!({"claim_id":claim.public_id,"plan_id":format!("rpl_{}",plan.id.0.simple()),"estimated_gas":plan.estimated_gas_atomic,"simulation":"SUCCEEDED","approval_required":false,"authorized_by":"claimant_signature"})).await?;
         Ok(ApprovalRequestResult {
             approval_id: approval,
-            status: "PENDING".into(),
+            status: "APPROVED".into(),
         })
     }
 
@@ -603,11 +608,10 @@ impl ControlledRecoveryTools for DatabaseAgentTools {
         _ctx: &AgentContext,
         _plan_id: RecoveryPlanId,
     ) -> Result<RecoveryExecutionResult, ToolError> {
-        // Every recovery requires an explicit merchant approval. The investigator
-        // may verify and simulate a plan, but it can never mint or consume an
-        // approval on its own.
+        // Execution always consumes a claimant-backed approval. The investigator
+        // may verify and simulate a plan, but it cannot bypass signature consent.
         Err(ToolError::PolicyDenied(
-            "human approval is required before recovery execution".into(),
+            "claimant authorization is required before recovery execution".into(),
         ))
     }
 
@@ -693,7 +697,7 @@ impl ControlledRecoveryTools for DatabaseAgentTools {
                 return Err(store_err(error));
             }
         };
-        let tx = match build_live_recover_erc20_transaction(&plan, salt, &runtime.factory) {
+        let tx = match build_live_recovery_transaction(&plan, salt, &runtime.factory) {
             Ok(tx) => tx,
             Err(error) => {
                 let _ = sqlx::query(
@@ -705,8 +709,13 @@ impl ControlledRecoveryTools for DatabaseAgentTools {
                 return Err(ToolError::Permanent(error.to_string()));
             }
         };
+        let transaction_class = if plan.token_contract.is_some() {
+            TransactionClass::RecoverErc20
+        } else {
+            TransactionClass::RecoverNative
+        };
         let policy = SignerPolicy {
-            allowed_classes: BTreeSet::from([TransactionClass::RecoverErc20]),
+            allowed_classes: BTreeSet::from([transaction_class.clone()]),
             factory_address: runtime.factory.clone(),
         };
         let request = ApprovedSignerRequest {
@@ -715,16 +724,13 @@ impl ControlledRecoveryTools for DatabaseAgentTools {
             approved_plan_hash: approved_hash.clone(),
             computed_plan_hash: plan_hash.clone(),
             approval_reserved_for_execution: true,
-            transaction_class: TransactionClass::RecoverErc20,
+            transaction_class: transaction_class.clone(),
             transaction: tx,
             expected_factory: runtime.factory.clone(),
             recovery_intent: Some(flowpay_signer::RecoveryIntent {
                 chain: plan.source_chain.clone(),
                 salt,
-                token: plan
-                    .token_contract
-                    .clone()
-                    .ok_or_else(|| ToolError::Permanent("token missing".into()))?,
+                token: plan.token_contract.clone(),
                 destination: plan.recovery_destination.value.clone(),
                 amount: plan.amount.clone(),
             }),
@@ -761,7 +767,7 @@ impl ControlledRecoveryTools for DatabaseAgentTools {
                 return Err(ToolError::Permanent(error.to_string()));
             }
         };
-        sqlx::query("INSERT INTO recovery_executions(recovery_plan_id,approval_id,plan_hash,transaction_class,chain,signer_key_ref,tx_hash,state) VALUES($1,$2,$3,'RECOVER_ERC20',$4,$5,$6,'SUBMITTED')").bind(plan_id.0).bind(approval_id.0).bind(&plan_hash).bind(plan.source_chain.to_string()).bind(signer_key_ref).bind(&tx_hash).execute(self.state.store.pool()).await.map_err(|error| { let _ = error; db_err("failed to persist recovery execution") })?;
+        sqlx::query("INSERT INTO recovery_executions(recovery_plan_id,approval_id,plan_hash,transaction_class,chain,signer_key_ref,tx_hash,state) VALUES($1,$2,$3,$4,$5,$6,$7,'SUBMITTED')").bind(plan_id.0).bind(approval_id.0).bind(&plan_hash).bind(transaction_class.as_str()).bind(plan.source_chain.to_string()).bind(signer_key_ref).bind(&tx_hash).execute(self.state.store.pool()).await.map_err(|error| { let _ = error; db_err("failed to persist recovery execution") })?;
         sqlx::query("UPDATE approvals SET status='CONSUMED',consumed_at=now() WHERE id=$1 AND status='EXECUTING'").bind(approval_id.0).execute(self.state.store.pool()).await.map_err(db_err)?;
         self.state
             .store
@@ -834,10 +840,6 @@ impl ControlledRecoveryTools for DatabaseAgentTools {
         if !receipt.success {
             return Ok(false);
         }
-        let token = plan
-            .token_contract
-            .as_deref()
-            .ok_or_else(|| ToolError::Permanent("token missing".into()))?;
         let row = sqlx::query("SELECT simulation_result FROM recovery_plans WHERE id=$1")
             .bind(plan_id.0)
             .fetch_one(self.state.store.pool())
@@ -850,15 +852,37 @@ impl ControlledRecoveryTools for DatabaseAgentTools {
             .ok_or_else(|| ToolError::Permanent("simulation missing destination balance".into()))?
             .parse::<AtomicAmount>()
             .map_err(|e| ToolError::Permanent(e.to_string()))?;
+        let checkout_before = simulation
+            .get("checkout_balance_before")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ToolError::Permanent("simulation missing checkout balance".into()))?
+            .parse::<AtomicAmount>()
+            .map_err(|e| ToolError::Permanent(e.to_string()))?;
         let expected = before.checked_add(&plan.amount);
-        let after = runtime
-            .adapter
-            .token_balance(token, &plan.recovery_destination.value)
-            .await
-            .map_err(chain_err)?;
-        let verified = after >= expected;
+        let after = self
+            .get_asset_balance(
+                ctx,
+                plan.source_chain.clone(),
+                plan.token_contract.as_deref(),
+                &plan.recovery_destination.value,
+            )
+            .await?;
+        let checkout_after = self
+            .get_asset_balance(
+                ctx,
+                plan.source_chain.clone(),
+                plan.token_contract.as_deref(),
+                &plan.checkout_address.value,
+            )
+            .await?;
+        let verified = if plan.token_contract.is_some() {
+            after >= expected
+        } else {
+            checkout_before >= plan.amount
+                && checkout_after.checked_add(&plan.amount) <= checkout_before
+        };
         if verified {
-            sqlx::query("UPDATE recovery_executions SET state='CONFIRMED',receipt=$2,verified_balance_delta=$3,updated_at=now() WHERE recovery_plan_id=$1").bind(plan_id.0).bind(json!({"transaction_hash":transaction_hash,"block_number":receipt.block_number,"block_hash":receipt.block_hash,"success":true})).bind(json!({"destination_before":before,"destination_after":after,"expected_delta":plan.amount})).execute(self.state.store.pool()).await.map_err(db_err)?;
+            sqlx::query("UPDATE recovery_executions SET state='CONFIRMED',receipt=$2,verified_balance_delta=$3,updated_at=now() WHERE recovery_plan_id=$1").bind(plan_id.0).bind(json!({"transaction_hash":transaction_hash,"block_number":receipt.block_number,"block_hash":receipt.block_hash,"success":true})).bind(json!({"destination_before":before,"destination_after":after,"checkout_before":checkout_before,"checkout_after":checkout_after,"expected_delta":plan.amount})).execute(self.state.store.pool()).await.map_err(db_err)?;
             self.state
                 .store
                 .set_claim_state(
@@ -933,6 +957,13 @@ fn risk_flag(v: &RiskFlag) -> String {
         RiskFlag::AmountMismatch => "AMOUNT_MISMATCH",
     }
     .into()
+}
+fn native_symbol(chain: &ChainKey) -> &'static str {
+    match chain {
+        ChainKey::Bsc => "BNB",
+        ChainKey::Solana => "SOL",
+        _ => "ETH",
+    }
 }
 fn store_err(e: flowpay_persistence::StoreError) -> ToolError {
     match e {

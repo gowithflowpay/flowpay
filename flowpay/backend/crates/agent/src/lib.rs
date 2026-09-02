@@ -115,11 +115,11 @@ pub trait InvestigationTools: Send + Sync {
         chain: ChainKey,
         candidate_address: &str,
     ) -> Result<CounterfactualVerification, ToolError>;
-    async fn get_token_balance(
+    async fn get_asset_balance(
         &self,
         ctx: &AgentContext,
         chain: ChainKey,
-        token_contract: &str,
+        token_contract: Option<&str>,
         address: &str,
     ) -> Result<AtomicAmount, ToolError>;
     async fn build_recovery_plan(&self, ctx: &AgentContext) -> Result<RecoveryPlan, ToolError>;
@@ -311,25 +311,14 @@ where
                 trajectory: trace,
             });
         }
-        let Some(token) = tx.token_contract.as_deref() else {
-            return Ok(AgentRunResult {
-                status: AgentRunStatus::Escalated,
-                concise_rationale: "native-asset recovery requires a separate constrained path"
-                    .into(),
-                plan_id: None,
-                approval_id: None,
-                recovery_transaction_hash: None,
-                trajectory: trace,
-            });
-        };
         let balance = self
             .tools
-            .get_token_balance(ctx, chain.clone(), token, &tx.to)
+            .get_asset_balance(ctx, chain.clone(), tx.token_contract.as_deref(), &tx.to)
             .await?;
         trace.push(step(
             seq,
-            "get_token_balance",
-            serde_json::json!({"chain":chain,"token_contract":token,"address":tx.to}),
+            "get_asset_balance",
+            serde_json::json!({"chain":chain,"token_contract":tx.token_contract,"address":tx.to}),
             serde_json::json!({"balance":balance}),
             "current recoverable balance checked on-chain",
             "A historical deposit is not recoverable if funds are no longer present.",
@@ -383,13 +372,13 @@ where
                 "request_approval",
                 serde_json::json!({"plan_id":plan.id}),
                 serde_json::json!({"approval_id":approval.approval_id,"status":approval.status}),
-                "deterministic policy requires a human approval checkpoint",
-                "Cross-chain and amount-discrepancy refunds are never auto-executed.",
+                "the verified claimant signature authorizes deterministic execution",
+                "The investigator cannot approve or execute a recovery.",
             ));
             return Ok(AgentRunResult {
                 status: AgentRunStatus::RecoverableAwaitingApproval,
                 concise_rationale:
-                    "recovery passed verification and simulation and is waiting for human approval"
+                    "recovery passed verification and simulation and has claimant authorization"
                         .into(),
                 plan_id: Some(plan.id),
                 approval_id: Some(approval.approval_id),
