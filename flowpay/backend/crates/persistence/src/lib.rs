@@ -26,6 +26,8 @@ pub const MIGRATION_0008_CHAIN_REGISTRY: &str =
     include_str!("../../../database/migrations/0008_chain_registry.sql");
 pub const MIGRATION_0009_CHAIN_AWARE_MONITORING: &str =
     include_str!("../../../database/migrations/0009_chain_aware_monitoring.sql");
+pub const MIGRATION_0010_SECURITY_HARDENING: &str =
+    include_str!("../../../database/migrations/0010_security_hardening.sql");
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -61,6 +63,8 @@ pub struct ApiKeyRecord {
     pub merchant_id: MerchantId,
     pub secret_hash: String,
     pub revoked: bool,
+    pub expires_at: Option<OffsetDateTime>,
+    pub merchant_active: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -107,11 +111,13 @@ impl PgStore {
     }
 
     pub async fn api_key_by_prefix(&self, prefix: &str) -> Result<ApiKeyRecord, StoreError> {
-        let row=sqlx::query("SELECT merchant_id, secret_hash, revoked_at IS NOT NULL AS revoked FROM api_keys WHERE public_prefix=$1 ORDER BY created_at DESC LIMIT 1").bind(prefix).fetch_optional(&self.pool).await?.ok_or(StoreError::NotFound)?;
+        let row=sqlx::query("SELECT k.merchant_id, k.secret_hash, k.revoked_at IS NOT NULL AS revoked, k.expires_at, m.status='ACTIVE' AS merchant_active FROM api_keys k JOIN merchants m ON m.id=k.merchant_id WHERE k.public_prefix=$1 ORDER BY k.created_at DESC LIMIT 1").bind(prefix).fetch_optional(&self.pool).await?.ok_or(StoreError::NotFound)?;
         Ok(ApiKeyRecord {
             merchant_id: MerchantId(row.try_get("merchant_id")?),
             secret_hash: row.try_get("secret_hash")?,
             revoked: row.try_get("revoked")?,
+            expires_at: row.try_get("expires_at")?,
+            merchant_active: row.try_get("merchant_active")?,
         })
     }
 
@@ -522,7 +528,7 @@ impl PgStore {
         &self,
         chain: &ChainKey,
     ) -> Result<Vec<PaymentId>, StoreError> {
-        let rows=sqlx::query_scalar::<_,Uuid>("SELECT p.id FROM payments p JOIN checkout_addresses c ON c.payment_id=p.id AND c.chain=$1 WHERE p.state IN ('WAITING','DETECTED','CONFIRMING','PARTIALLY_PAID','OVERPAID','WRONG_ASSET','CONFIRMED','SETTLING') ORDER BY p.created_at").bind(chain.to_string()).fetch_all(&self.pool).await?;
+        let rows=sqlx::query_scalar::<_,Uuid>("SELECT DISTINCT p.id FROM payments p JOIN checkout_addresses c ON c.payment_id=p.id AND c.chain=$1 WHERE p.state IN ('WAITING','DETECTED','CONFIRMING','PARTIALLY_PAID','OVERPAID','WRONG_ASSET','CONFIRMED','SETTLING') ORDER BY p.created_at").bind(chain.to_string()).fetch_all(&self.pool).await?;
         Ok(rows.into_iter().map(PaymentId).collect())
     }
 

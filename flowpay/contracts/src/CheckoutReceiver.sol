@@ -36,7 +36,16 @@ contract CheckoutReceiver {
         if (destination == address(0)) revert ZeroDestination();
         uint256 balance = IERC20Minimal(token).balanceOf(address(this));
         transferred = amount > balance ? balance : amount;
-        if (transferred != 0 && !IERC20Minimal(token).transfer(destination, transferred)) revert TransferFailed();
+        if (transferred != 0) {
+            // Support both standard ERC-20 tokens and legacy tokens such as USDT
+            // that return no data from transfer().
+            (bool ok, bytes memory result) = token.call(
+                abi.encodeWithSelector(IERC20Minimal.transfer.selector, destination, transferred)
+            );
+            if (!ok || (result.length != 0 && !abi.decode(result, (bool)))) {
+                revert TransferFailed();
+            }
+        }
     }
 
     function sweepNative(address payable destination, uint256 maxAmount)

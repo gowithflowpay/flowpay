@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+alloy-primitives.workspace = true
 async-trait.workspace = true
 flowpay-chains = { path = "../chains" }
 flowpay-domain = { path = "../domain" }

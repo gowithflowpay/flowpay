@@ -1,3 +1,4 @@
+use axum::http::{header, HeaderValue, Method};
 use flowpay_runtime::{config::Config, routes, state::AppState};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -17,8 +18,24 @@ async fn main() -> anyhow::Result<()> {
     let bind = config.bind.clone();
     let state = AppState::build(config).await?;
 
+    let allowed_origins = std::env::var("FLOWPAY_ALLOWED_ORIGINS")
+        .unwrap_or_else(|_| "http://localhost:3000,http://localhost:3001".into())
+        .split(',')
+        .filter_map(|origin| origin.trim().parse::<HeaderValue>().ok())
+        .collect::<Vec<_>>();
+    let cors = CorsLayer::new()
+        .allow_origin(allowed_origins)
+        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_headers([
+            header::CONTENT_TYPE,
+            header::AUTHORIZATION,
+            header::HeaderName::from_static("x-flowpay-api-key"),
+            header::HeaderName::from_static("idempotency-key"),
+            header::HeaderName::from_static("x-alchemy-signature"),
+        ]);
+
     let app = routes::router(state)
-        .layer(CorsLayer::permissive())
+        .layer(cors)
         .layer(TraceLayer::new_for_http());
 
     let listener = tokio::net::TcpListener::bind(&bind).await?;

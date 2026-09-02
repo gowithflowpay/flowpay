@@ -330,7 +330,12 @@ impl InvestigationTools for DatabaseAgentTools {
             .adapter
             .token_metadata(&token)
             .await
-            .map_err(chain_err)?;
+            .map_err(|error| {
+                let _ = error;
+                ToolError::Permanent(
+                    "unsupported token behavior: metadata could not be verified".into(),
+                )
+            })?;
         let supported = self
             .state
             .store
@@ -355,8 +360,9 @@ impl InvestigationTools for DatabaseAgentTools {
         } else {
             tx.amount.clone()
         };
-        // Deduct 10% platform fee; owner receives net amount.
-        let recover_amount = flowpay_domain::owner_receivable_amount(&gross_amount);
+        // Demo policy: return the full verified amount. Fee routing is intentionally
+        // disabled until a treasury destination and atomic split transfer are configured.
+        let recover_amount = gross_amount;
         let supported_assets = supported.map_or_else(Vec::new, |a| {
             vec![SupportedAsset {
                 chain: chain.clone(),
@@ -594,102 +600,15 @@ impl ControlledRecoveryTools for DatabaseAgentTools {
 
     async fn execute_proven_recovery(
         &self,
-        ctx: &AgentContext,
-        plan_id: RecoveryPlanId,
+        _ctx: &AgentContext,
+        _plan_id: RecoveryPlanId,
     ) -> Result<RecoveryExecutionResult, ToolError> {
-        let (plan, plan_hash) = self.load_plan(plan_id).await?;
-        if plan.claim_id != ctx.claim_id || plan.payment_id != ctx.payment_id {
-            return Err(ToolError::NotAuthorized);
-        }
-        if plan.policy_decision != RecoveryPolicyDecision::Allowed
-            || plan.simulation_status != SimulationStatus::Succeeded
-        {
-            return Err(ToolError::PolicyDenied(
-                "policy and successful simulation are required".into(),
-            ));
-        }
-        let claim = self
-            .state
-            .store
-            .get_claim_by_id(ctx.claim_id)
-            .await
-            .map_err(store_err)?;
-        let payment = self
-            .state
-            .store
-            .get_payment_by_id(ctx.payment_id)
-            .await
-            .map_err(store_err)?;
-        if claim
-            .claimed_chain
-            .as_ref()
-            .is_some_and(|c| *c != payment.expected_chain)
-            && payment.state == PaymentState::ClaimPending
-        {
-            self.state
-                .store
-                .set_payment_state(
-                    payment.id,
-                    PaymentState::WrongChainClaimed,
-                    "wrong_chain_verified",
-                    claim.claimed_chain.as_ref(),
-                    claim.transaction_hash.as_deref(),
-                )
-                .await
-                .map_err(store_err)?;
-            self.state
-                .store
-                .set_payment_state(
-                    payment.id,
-                    PaymentState::RecoveryAvailable,
-                    "recovery_plan_simulated",
-                    claim.claimed_chain.as_ref(),
-                    claim.transaction_hash.as_deref(),
-                )
-                .await
-                .map_err(store_err)?;
-        } else if payment.state == PaymentState::ClaimPending {
-            self.state
-                .store
-                .set_payment_state(
-                    payment.id,
-                    PaymentState::RecoveryAvailable,
-                    "recovery_plan_simulated",
-                    claim.claimed_chain.as_ref(),
-                    claim.transaction_hash.as_deref(),
-                )
-                .await
-                .map_err(store_err)?;
-        }
-        // Transition claim through Recoverable → RecoveryPending (skip ApprovalPending)
-        if claim.state == ClaimState::Investigating {
-            self.state
-                .store
-                .set_claim_state(
-                    claim.id,
-                    ClaimState::Recoverable,
-                    "recovery_plan_simulated",
-                    "AGENT",
-                )
-                .await
-                .map_err(store_err)?;
-        }
-        self.state
-            .store
-            .set_claim_state(
-                claim.id,
-                ClaimState::RecoveryPending,
-                "proven_recovery_auto_executed",
-                "AGENT",
-            )
-            .await
-            .map_err(store_err)?;
-        // Auto-create and immediately consume an approval (no human checkpoint)
-        let approval = ApprovalId::new();
-        let nonce = Uuid::now_v7().simple().to_string();
-        sqlx::query("INSERT INTO approvals(id,public_id,claim_id,recovery_plan_id,plan_hash,status,approval_nonce,expires_at) VALUES($1,$2,$3,$4,$5,'APPROVED',$6,$7)").bind(approval.0).bind(format!("apr_{}",approval.0.simple())).bind(claim.id.0).bind(plan.id.0).bind(&plan_hash).bind(nonce).bind(OffsetDateTime::now_utc()+Duration::minutes(15)).execute(self.state.store.pool()).await.map_err(db_err)?;
-        // Now execute using the existing approval path
-        self.execute_approved_recovery(ctx, plan_id, approval).await
+        // Every recovery requires an explicit merchant approval. The investigator
+        // may verify and simulate a plan, but it can never mint or consume an
+        // approval on its own.
+        Err(ToolError::PolicyDenied(
+            "human approval is required before recovery execution".into(),
+        ))
     }
 
     async fn execute_approved_recovery(
@@ -722,25 +641,70 @@ impl ControlledRecoveryTools for DatabaseAgentTools {
                 "approval plan hash no longer matches current plan".into(),
             ));
         }
-        let runtime = self
-            .state
-            .chains
-            .get(&plan.source_chain)
-            .ok_or_else(|| ToolError::Permanent("unsupported network".into()))?;
-        let payment = self
-            .state
-            .store
-            .get_payment_by_id(plan.payment_id)
-            .await
-            .map_err(store_err)?;
-        let salt = self
+        let reserved = sqlx::query(
+            "UPDATE approvals SET status='EXECUTING',approved_at=COALESCE(approved_at,now()) WHERE id=$1 AND status='APPROVED' AND expires_at>now()",
+        )
+        .bind(approval_id.0)
+        .execute(self.state.store.pool())
+        .await
+        .map_err(db_err)?
+        .rows_affected();
+        if reserved != 1 {
+            return Err(ToolError::NotAuthorized);
+        }
+        let runtime = match self.state.chains.get(&plan.source_chain) {
+            Some(runtime) => runtime,
+            None => {
+                let _ = sqlx::query(
+                    "UPDATE approvals SET status='APPROVED' WHERE id=$1 AND status='EXECUTING'",
+                )
+                .bind(approval_id.0)
+                .execute(self.state.store.pool())
+                .await;
+                return Err(ToolError::Permanent("unsupported network".into()));
+            }
+        };
+        let payment = match self.state.store.get_payment_by_id(plan.payment_id).await {
+            Ok(payment) => payment,
+            Err(error) => {
+                let _ = sqlx::query(
+                    "UPDATE approvals SET status='APPROVED' WHERE id=$1 AND status='EXECUTING'",
+                )
+                .bind(approval_id.0)
+                .execute(self.state.store.pool())
+                .await;
+                return Err(store_err(error));
+            }
+        };
+        let salt = match self
             .state
             .store
             .checkout_salt(plan.payment_id, &payment.expected_chain)
             .await
-            .map_err(store_err)?;
-        let tx = build_live_recover_erc20_transaction(&plan, salt, &runtime.factory)
-            .map_err(|e| ToolError::Permanent(e.to_string()))?;
+        {
+            Ok(salt) => salt,
+            Err(error) => {
+                let _ = sqlx::query(
+                    "UPDATE approvals SET status='APPROVED' WHERE id=$1 AND status='EXECUTING'",
+                )
+                .bind(approval_id.0)
+                .execute(self.state.store.pool())
+                .await;
+                return Err(store_err(error));
+            }
+        };
+        let tx = match build_live_recover_erc20_transaction(&plan, salt, &runtime.factory) {
+            Ok(tx) => tx,
+            Err(error) => {
+                let _ = sqlx::query(
+                    "UPDATE approvals SET status='APPROVED' WHERE id=$1 AND status='EXECUTING'",
+                )
+                .bind(approval_id.0)
+                .execute(self.state.store.pool())
+                .await;
+                return Err(ToolError::Permanent(error.to_string()));
+            }
+        };
         let policy = SignerPolicy {
             allowed_classes: BTreeSet::from([TransactionClass::RecoverErc20]),
             factory_address: runtime.factory.clone(),
@@ -754,40 +718,51 @@ impl ControlledRecoveryTools for DatabaseAgentTools {
             transaction_class: TransactionClass::RecoverErc20,
             transaction: tx,
             expected_factory: runtime.factory.clone(),
+            recovery_intent: Some(flowpay_signer::RecoveryIntent {
+                chain: plan.source_chain.clone(),
+                salt,
+                token: plan
+                    .token_contract
+                    .clone()
+                    .ok_or_else(|| ToolError::Permanent("token missing".into()))?,
+                destination: plan.recovery_destination.value.clone(),
+                amount: plan.amount.clone(),
+            }),
         };
-        let (tx_hash, signer_key_ref) = if let Some(private_key) =
+        let submission = if let Some(private_key) =
             self.state.config.operator_private_key.as_deref()
         {
             let signer = TestnetKeySigner::from_private_key(policy, &runtime.rpc_url, private_key)
                 .map_err(|e| ToolError::Permanent(e.to_string()))?;
-            (
-                signer
-                    .submit_recovery(&request)
-                    .await
-                    .map_err(|e| ToolError::Permanent(e.to_string()))?,
-                "configured-testnet-key",
-            )
+            signer
+                .submit_recovery(&request)
+                .await
+                .map(|hash| (hash, "configured-testnet-key"))
         } else {
             let signer = DevUnlockedSigner::new(
                 policy,
                 &runtime.rpc_url,
                 &self.state.config.operator_address,
             );
-            (
-                signer
-                    .submit_recovery(&request)
-                    .await
-                    .map_err(|e| ToolError::Permanent(e.to_string()))?,
-                "local-unlocked-operator",
-            )
+            signer
+                .submit_recovery(&request)
+                .await
+                .map(|hash| (hash, "local-unlocked-operator"))
         };
-        let mut db_tx = self.state.store.pool().begin().await.map_err(db_err)?;
-        let consumed=sqlx::query("UPDATE approvals SET status='CONSUMED',consumed_at=now() WHERE id=$1 AND status='APPROVED'").bind(approval_id.0).execute(&mut *db_tx).await.map_err(db_err)?.rows_affected();
-        if consumed != 1 {
-            return Err(ToolError::NotAuthorized);
-        }
-        sqlx::query("INSERT INTO recovery_executions(recovery_plan_id,approval_id,plan_hash,transaction_class,chain,signer_key_ref,tx_hash,state) VALUES($1,$2,$3,'RECOVER_ERC20',$4,$5,$6,'SUBMITTED')").bind(plan_id.0).bind(approval_id.0).bind(&plan_hash).bind(plan.source_chain.to_string()).bind(signer_key_ref).bind(&tx_hash).execute(&mut *db_tx).await.map_err(db_err)?;
-        db_tx.commit().await.map_err(db_err)?;
+        let (tx_hash, signer_key_ref) = match submission {
+            Ok(value) => value,
+            Err(error) => {
+                let _ = sqlx::query(
+                    "UPDATE approvals SET status='APPROVED' WHERE id=$1 AND status='EXECUTING'",
+                )
+                .bind(approval_id.0)
+                .execute(self.state.store.pool())
+                .await;
+                return Err(ToolError::Permanent(error.to_string()));
+            }
+        };
+        sqlx::query("INSERT INTO recovery_executions(recovery_plan_id,approval_id,plan_hash,transaction_class,chain,signer_key_ref,tx_hash,state) VALUES($1,$2,$3,'RECOVER_ERC20',$4,$5,$6,'SUBMITTED')").bind(plan_id.0).bind(approval_id.0).bind(&plan_hash).bind(plan.source_chain.to_string()).bind(signer_key_ref).bind(&tx_hash).execute(self.state.store.pool()).await.map_err(|error| { let _ = error; db_err("failed to persist recovery execution") })?;
+        sqlx::query("UPDATE approvals SET status='CONSUMED',consumed_at=now() WHERE id=$1 AND status='EXECUTING'").bind(approval_id.0).execute(self.state.store.pool()).await.map_err(db_err)?;
         self.state
             .store
             .set_claim_state(

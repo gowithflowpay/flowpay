@@ -22,6 +22,7 @@ use sha2::{Digest, Sha256};
 use sqlx::Row;
 use std::time::Duration as StdDuration;
 use std::{path::PathBuf, str::FromStr};
+use subtle::ConstantTimeEq;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
@@ -188,8 +189,7 @@ async fn create_payment(
     let request_bytes = serde_json::to_vec(&req).map_err(internal)?;
     let request_hash = hex::encode(Sha256::digest(&request_bytes));
     if let Some(existing) =
-        load_idempotent_response(&state, merchant, "POST:/v1/payments", &idem, &request_hash)
-            .await?
+        reserve_idempotency_key(&state, merchant, "POST:/v1/payments", &idem, &request_hash).await?
     {
         let response: PaymentResponse = serde_json::from_value(existing).map_err(internal)?;
         return Ok((StatusCode::OK, Json(response)));
@@ -378,12 +378,7 @@ async fn register_checkout_with_alchemy(
                 ApiError::new(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "alchemy_webhook_not_configured",
-                    format!(
-                        "webhook ID is not configured for {network} (chain {chain}); add {env_key} or pre-create the webhook on Alchemy",
-                        network = network,
-                        chain = chain.to_string(),
-                        env_key = env_key,
-                    ),
+                    format!("webhook ID is not configured for {network} (chain {chain}); add {env_key} or pre-create the webhook on Alchemy"),
                 )
             })?;
 
@@ -411,12 +406,7 @@ async fn register_checkout_with_alchemy(
                 return Err(ApiError::new(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "alchemy_checkout_sync_failed",
-                    format!(
-                        "Alchemy rejected checkout address registration for {network} (webhook {webhook_id}, status {status})",
-                        network = network,
-                        webhook_id = webhook_id,
-                        status = status,
-                    ),
+                    format!("Alchemy rejected checkout address registration for {network} (webhook {webhook_id}, status {status})"),
                 ));
             }
             Err(error) => {
@@ -424,11 +414,7 @@ async fn register_checkout_with_alchemy(
                 return Err(ApiError::new(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "alchemy_checkout_sync_failed",
-                    format!(
-                        "Alchemy address synchronization request failed for {network} (webhook {webhook_id})",
-                        network = network,
-                        webhook_id = webhook_id,
-                    ),
+                    format!("Alchemy address synchronization request failed for {network} (webhook {webhook_id})"),
                 ));
             }
         }
@@ -592,7 +578,7 @@ async fn create_claim(
     let idem = idempotency_key(&headers)?;
     let request_hash = hex::encode(Sha256::digest(serde_json::to_vec(&req).map_err(internal)?));
     if let Some(existing) =
-        load_idempotent_response(&state, merchant, "POST:/v1/claims", &idem, &request_hash).await?
+        reserve_idempotency_key(&state, merchant, "POST:/v1/claims", &idem, &request_hash).await?
     {
         return Ok((StatusCode::OK, Json(existing)));
     }
@@ -661,7 +647,7 @@ async fn create_claim(
             }
             _ => db(e),
         })?;
-    let _ = state
+    state
         .store
         .set_payment_state(
             payment.id,
@@ -670,7 +656,14 @@ async fn create_claim(
             claimed_chain.as_ref(),
             req.transaction_hash.as_deref(),
         )
-        .await;
+        .await
+        .map_err(|_error| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "claim_payment_transition_failed",
+                "claim could not be synchronized with the payment state",
+            )
+        })?;
     let mut challenge_json = Value::Null;
     if let Some(wallet) = req.originating_wallet.as_deref() {
         let challenge_chain = claimed_chain.as_ref().unwrap_or(&payment.expected_chain);
@@ -866,7 +859,7 @@ async fn add_evidence(
         .await
         .map_err(db)?;
     if claim.state == ClaimState::AwaitingEvidence {
-        let _ = state
+        state
             .store
             .set_claim_state(
                 claim.id,
@@ -878,7 +871,8 @@ async fn add_evidence(
                 "evidence_received",
                 "CUSTOMER",
             )
-            .await;
+            .await
+            .map_err(db)?;
     }
     Ok((
         StatusCode::CREATED,
@@ -1201,7 +1195,17 @@ fn validate_webhook_url(value: &str, environment: &str) -> Result<(), ApiError> 
             || host.starts_with("127.")
             || host.starts_with("10.")
             || host.starts_with("192.168.")
-            || host.starts_with("169.254."))
+            || host.starts_with("169.254.")
+            || host.starts_with("172.16.")
+            || host.starts_with("172.17.")
+            || host.starts_with("172.18.")
+            || host.starts_with("172.19.")
+            || host.starts_with("172.2")
+            || host.starts_with("172.30.")
+            || host.starts_with("172.31.")
+            || host.starts_with("fc")
+            || host.starts_with("fd")
+            || host.starts_with("fe80:"))
     {
         return Err(ApiError::bad(
             "invalid_webhook_url",
@@ -1234,8 +1238,12 @@ async fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<MerchantI
         .and_then(|v| v.to_str().ok())
     {
         Some(k) => k,
-        None if state.config.environment == "local" => {
-            // Dev mode: allow unauthenticated requests from the local merchant dashboard.
+        None if cfg!(debug_assertions)
+            && state.config.environment == "local"
+            && std::env::var("FLOWPAY_NGROK_ENABLED")
+                .map_or(true, |value| !value.eq_ignore_ascii_case("true")) =>
+        {
+            // Unauthenticated access is available only in a debug local build.
             return Ok(state.config.default_dev_merchant());
         }
         _ => {
@@ -1254,6 +1262,23 @@ async fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<MerchantI
             "invalid API key",
         )
     })?;
+    if !record.merchant_active {
+        return Err(ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "merchant_disabled",
+            "merchant account is disabled",
+        ));
+    }
+    if record
+        .expires_at
+        .is_some_and(|expires| expires <= OffsetDateTime::now_utc())
+    {
+        return Err(ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "expired_api_key",
+            "API key has expired",
+        ));
+    }
     if record.revoked {
         return Err(ApiError::new(
             StatusCode::UNAUTHORIZED,
@@ -1264,7 +1289,12 @@ async fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<MerchantI
     let computed = hex::encode(Sha256::digest(
         [state.config.api_key_pepper.as_bytes(), key.as_bytes()].concat(),
     ));
-    if computed != record.secret_hash {
+    if computed
+        .as_bytes()
+        .ct_eq(record.secret_hash.as_bytes())
+        .unwrap_u8()
+        != 1
+    {
         return Err(ApiError::new(
             StatusCode::UNAUTHORIZED,
             "invalid_api_key",
@@ -1291,14 +1321,14 @@ fn idempotency_key(headers: &HeaderMap) -> Result<String, ApiError> {
     }
     Ok(value.to_owned())
 }
-async fn load_idempotent_response(
+async fn reserve_idempotency_key(
     state: &AppState,
     merchant: MerchantId,
     scope: &str,
     key: &str,
     request_hash: &str,
 ) -> Result<Option<Value>, ApiError> {
-    let row=sqlx::query("SELECT request_hash,response_body FROM idempotency_keys WHERE merchant_id=$1 AND api_scope=$2 AND idempotency_key=$3 AND expires_at>now()").bind(merchant.0).bind(scope).bind(key).fetch_optional(state.store.pool()).await.map_err(db)?;
+    let row=sqlx::query("SELECT request_hash,response_body,response_status FROM idempotency_keys WHERE merchant_id=$1 AND api_scope=$2 AND idempotency_key=$3").bind(merchant.0).bind(scope).bind(key).fetch_optional(state.store.pool()).await.map_err(db)?;
     if let Some(row) = row {
         let existing: String = row.try_get("request_hash").map_err(internal)?;
         if existing != request_hash {
@@ -1308,9 +1338,36 @@ async fn load_idempotent_response(
                 "same Idempotency-Key was used with a different request",
             ));
         }
-        return Ok(row.try_get("response_body").map_err(internal)?);
+        let response: Option<Value> = row.try_get("response_body").map_err(internal)?;
+        if let Some(response) = response {
+            return Ok(Some(response));
+        }
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "idempotency_in_progress",
+            "an identical request is already being processed",
+        ));
     }
-    Ok(None)
+    sqlx::query("INSERT INTO idempotency_keys(merchant_id,api_scope,idempotency_key,request_hash,response_status,response_body,expires_at) VALUES($1,$2,$3,$4,NULL,NULL,now()+interval '24 hours') ON CONFLICT DO NOTHING")
+        .bind(merchant.0)
+        .bind(scope)
+        .bind(key)
+        .bind(request_hash)
+        .execute(state.store.pool())
+        .await
+        .map_err(db)?;
+    let row = sqlx::query("SELECT request_hash,response_body FROM idempotency_keys WHERE merchant_id=$1 AND api_scope=$2 AND idempotency_key=$3")
+        .bind(merchant.0).bind(scope).bind(key).fetch_one(state.store.pool()).await.map_err(db)?;
+    let existing_hash: String = row.try_get("request_hash").map_err(internal)?;
+    if existing_hash != request_hash {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "idempotency_conflict",
+            "same Idempotency-Key was used with a different request",
+        ));
+    }
+    let existing: Option<Value> = row.try_get("response_body").map_err(internal)?;
+    Ok(existing)
 }
 async fn store_idempotent_response<T: Serialize>(
     state: &AppState,
@@ -1344,6 +1401,23 @@ async fn store_idempotent_value(
     resource_type: &str,
     resource_id: &str,
 ) -> Result<(), ApiError> {
+    sqlx::query("UPDATE idempotency_keys SET response_status=201,response_body=$4,resource_type=$5,resource_public_id=$6 WHERE merchant_id=$1 AND api_scope=$2 AND idempotency_key=$3 AND response_body IS NULL")
+        .bind(merchant.0)
+        .bind(scope)
+        .bind(key)
+        .bind(response)
+        .bind(resource_type)
+        .bind(resource_id)
+        .execute(state.store.pool())
+        .await
+        .map_err(db)?;
+    sqlx::query("DELETE FROM idempotency_keys WHERE merchant_id=$1 AND api_scope=$2 AND idempotency_key=$3 AND expires_at<=now()")
+        .bind(merchant.0)
+        .bind(scope)
+        .bind(key)
+        .execute(state.store.pool())
+        .await
+        .map_err(db)?;
     sqlx::query("INSERT INTO idempotency_keys(merchant_id,api_scope,idempotency_key,request_hash,response_status,response_body,resource_type,resource_public_id,expires_at) VALUES($1,$2,$3,$4,201,$5,$6,$7,now()+interval '24 hours') ON CONFLICT DO NOTHING").bind(merchant.0).bind(scope).bind(key).bind(request_hash).bind(response).bind(resource_type).bind(resource_id).execute(state.store.pool()).await.map_err(db)?;
     Ok(())
 }
@@ -1544,9 +1618,19 @@ async fn create_api_key(
             "key name must be 1-80 characters",
         ));
     }
-    let environment = req.environment.as_deref().unwrap_or(if state.config.environment == "local" { "test" } else { "live" });
+    let environment =
+        req.environment
+            .as_deref()
+            .unwrap_or(if state.config.environment == "local" {
+                "test"
+            } else {
+                "live"
+            });
     if !matches!(environment, "live" | "test") {
-        return Err(ApiError::bad("invalid_environment", "environment must be live or test"));
+        return Err(ApiError::bad(
+            "invalid_environment",
+            "environment must be live or test",
+        ));
     }
     let prefix = format!(
         "fp_{}_{}",
@@ -1695,15 +1779,12 @@ mod alchemy_checkout_sync_tests {
         assert!(monitored.is_empty());
     }
 
-    /// Configured webhook IDs must line up with ALCHEMY_NETWORKS.
+    /// Configured webhook IDs must line up with `ALCHEMY_NETWORKS`.
     #[test]
     fn webhook_networks_only_include_configured_chains() {
         let mut config = test_config();
         config.environment = "production".into();
-        config.alchemy_networks = vec![
-            "base-sepolia".into(),
-            "bsc-testnet".into(),
-        ];
+        config.alchemy_networks = vec!["base-sepolia".into(), "bsc-testnet".into()];
         config
             .alchemy_webhook_ids
             .insert(ChainKey::Custom("base_sepolia".into()), "wh_base".into());
@@ -1722,7 +1803,7 @@ mod alchemy_checkout_sync_tests {
         assert!(pairs.contains(&("BNB_TESTNET".into(), "bsc_testnet".into())));
     }
 
-    /// ALCHEMY_NETWORKS without webhook IDs must not pretend a webhook exists.
+    /// `ALCHEMY_NETWORKS` without webhook IDs must not pretend a webhook exists.
     #[test]
     fn mismatched_alchemy_networks_fails_fast() {
         let mut config = test_config();

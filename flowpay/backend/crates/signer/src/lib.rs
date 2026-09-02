@@ -1,10 +1,11 @@
+use alloy_primitives::keccak256;
 use async_trait::async_trait;
 use ethers_signers::{LocalWallet, Signer};
 use flowpay_chains::PreparedTransaction;
-use flowpay_domain::{ApprovalId, RecoveryPlanId};
+use flowpay_domain::{ApprovalId, AtomicAmount, ChainKey, RecoveryPlanId};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, str::FromStr};
 use thiserror::Error;
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
@@ -40,6 +41,7 @@ pub struct ApprovedSignerRequest {
     pub transaction_class: TransactionClass,
     pub transaction: PreparedTransaction,
     pub expected_factory: String,
+    pub recovery_intent: Option<RecoveryIntent>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -66,6 +68,8 @@ pub enum SignerError {
     UnexpectedValue,
     #[error("settlement destination does not match merchant configuration")]
     WrongSettlementDestination,
+    #[error("recovery calldata does not match the approved plan")]
+    CalldataMismatch,
     #[error("rpc error: {0}")]
     Rpc(String),
 }
@@ -74,6 +78,79 @@ pub enum SignerError {
 pub struct SignerPolicy {
     pub allowed_classes: BTreeSet<TransactionClass>,
     pub factory_address: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RecoveryIntent {
+    pub chain: ChainKey,
+    pub salt: [u8; 32],
+    pub token: String,
+    pub destination: String,
+    pub amount: AtomicAmount,
+}
+
+fn decode_word(data: &[u8], index: usize) -> Option<&[u8]> {
+    let start = 4 + index * 32;
+    data.get(start..start + 32)
+}
+
+fn decode_address(word: &[u8]) -> Option<String> {
+    let address = word.get(12..32)?;
+    Some(format!("0x{}", hex::encode(address)))
+}
+
+fn decode_amount(word: &[u8]) -> Result<AtomicAmount, SignerError> {
+    AtomicAmount::from_str(
+        &hex::encode(word)
+            .trim_start_matches('0')
+            .to_owned()
+            .if_empty_then_zero(),
+    )
+    .map_err(|_| SignerError::CalldataMismatch)
+}
+
+trait EmptyAsZero {
+    fn if_empty_then_zero(self) -> String;
+}
+impl EmptyAsZero for String {
+    fn if_empty_then_zero(self) -> String {
+        if self.is_empty() {
+            "0".into()
+        } else {
+            self
+        }
+    }
+}
+
+fn validate_recovery_calldata(
+    request: &ApprovedSignerRequest,
+    intent: &RecoveryIntent,
+) -> Result<(), SignerError> {
+    if request.transaction.chain != intent.chain {
+        return Err(SignerError::CalldataMismatch);
+    }
+    let data = hex::decode(request.transaction.calldata_hex.trim_start_matches("0x"))
+        .map_err(|_| SignerError::CalldataMismatch)?;
+    let selector = &keccak256("recoverToken(bytes32,address,address,uint256)".as_bytes())[..4];
+    if data.len() != 4 + 32 * 4 || data.get(..4) != Some(selector) {
+        return Err(SignerError::CalldataMismatch);
+    }
+    let salt = decode_word(&data, 0).ok_or(SignerError::CalldataMismatch)?;
+    if salt != intent.salt {
+        return Err(SignerError::CalldataMismatch);
+    }
+    let token = decode_address(decode_word(&data, 1).ok_or(SignerError::CalldataMismatch)?)
+        .ok_or(SignerError::CalldataMismatch)?;
+    let destination = decode_address(decode_word(&data, 2).ok_or(SignerError::CalldataMismatch)?)
+        .ok_or(SignerError::CalldataMismatch)?;
+    let amount = decode_amount(decode_word(&data, 3).ok_or(SignerError::CalldataMismatch)?)?;
+    if !token.eq_ignore_ascii_case(&intent.token)
+        || !destination.eq_ignore_ascii_case(&intent.destination)
+        || amount != intent.amount
+    {
+        return Err(SignerError::CalldataMismatch);
+    }
+    Ok(())
 }
 
 impl SignerPolicy {
@@ -105,6 +182,13 @@ impl SignerPolicy {
         ) && !request.transaction.value.is_zero()
         {
             return Err(SignerError::UnexpectedValue);
+        }
+        if request.transaction_class == TransactionClass::RecoverErc20 {
+            let intent = request
+                .recovery_intent
+                .as_ref()
+                .ok_or(SignerError::CalldataMismatch)?;
+            validate_recovery_calldata(request, intent)?;
         }
         Ok(())
     }
@@ -389,11 +473,15 @@ mod tests {
                 chain: ChainKey::Bsc,
                 to: "0xfac".into(),
                 value: AtomicAmount::from_str("0").unwrap(),
-                calldata_hex: "0x1234".into(),
+                calldata_hex: "0x9f8a13d700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000".into(),
             },
             expected_factory: "0xfac".into(),
+            recovery_intent: None,
         };
-        assert!(policy.validate(&request).is_ok());
+        assert!(matches!(
+            policy.validate(&request),
+            Err(SignerError::CalldataMismatch)
+        ));
         request.approval_reserved_for_execution = false;
         assert!(matches!(
             policy.validate(&request),

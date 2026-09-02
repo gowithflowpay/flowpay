@@ -819,7 +819,10 @@ async fn settlement_tick(state: &AppState) -> anyhow::Result<()> {
     else {
         return Ok(());
     };
+    let heartbeat =
+        spawn_lease_heartbeat(state.clone(), "settlement-coordinator", holder.clone(), 120);
     let result = settlement_tick_inner(state).await;
+    heartbeat.abort();
     release_service_lease(state, "settlement-coordinator", &holder).await;
     result
 }
@@ -872,11 +875,21 @@ async fn settlement_tick_inner(state: &AppState) -> anyhow::Result<()> {
             .store
             .checkout_salt(payment.id, &payment.expected_chain)
             .await?;
+        let canonical_amount: String = sqlx::query_scalar(
+            "SELECT COALESCE(sum(amount_atomic), 0)::text FROM deposits WHERE payment_id=$1 AND chain=$2 AND classification='EXPECTED_ASSET' AND confirmation_status='FINAL' AND upper(asset_symbol)=upper($3) AND (($4::text IS NULL AND token_contract IS NULL) OR lower(token_contract)=lower($4))",
+        )
+        .bind(payment.id.0)
+        .bind(payment.expected_chain.to_string())
+        .bind(&payment.expected_asset.symbol)
+        .bind(&payment.expected_asset.token_contract)
+        .fetch_one(state.store.pool())
+        .await?;
+        let canonical_amount = canonical_amount.parse::<AtomicAmount>()?;
+        if canonical_amount < payment.expected_amount {
+            warn!(payment_id=%payment.id.0, canonical_amount=%canonical_amount, expected_amount=%payment.expected_amount, "settlement withheld because canonical deposits do not cover expected amount");
+            continue;
+        }
         let (tx, class) = if let Some(token) = payment.expected_asset.token_contract.as_deref() {
-            let balance = runtime
-                .adapter
-                .token_balance(token, &payment.checkout_address.value)
-                .await?;
             (
                 build_factory_erc20_sweep(
                     payment.expected_chain.clone(),
@@ -884,23 +897,19 @@ async fn settlement_tick_inner(state: &AppState) -> anyhow::Result<()> {
                     &runtime.factory,
                     token,
                     &destination,
-                    &balance,
+                    &canonical_amount,
                     "SETTLE_ERC20",
                 )?,
                 TransactionClass::SettleErc20,
             )
         } else {
-            let balance = runtime
-                .adapter
-                .native_balance(&payment.checkout_address.value)
-                .await?;
             (
                 build_factory_native_sweep(
                     payment.expected_chain.clone(),
                     salt,
                     &runtime.factory,
                     &destination,
-                    &balance,
+                    &canonical_amount,
                     "SETTLE_NATIVE",
                 )?,
                 TransactionClass::SettleNative,
@@ -976,7 +985,7 @@ async fn settlement_tick_inner(state: &AppState) -> anyhow::Result<()> {
             .bind(payment.expected_chain.to_string())
             .bind(&payment.expected_asset.symbol)
             .bind(&payment.expected_asset.token_contract)
-            .bind(payment.expected_amount.to_string())
+            .bind(canonical_amount.to_string())
             .bind(&destination)
             .bind(&tx_hash)
             .bind(json!({"success":true,"gas_estimate":simulation.gas_estimate}))
@@ -1054,7 +1063,14 @@ async fn webhook_tick(state: &AppState) -> anyhow::Result<()> {
     else {
         return Ok(());
     };
+    let heartbeat = spawn_lease_heartbeat(
+        state.clone(),
+        "webhook-delivery-coordinator",
+        holder.clone(),
+        60,
+    );
     let result = webhook_tick_inner(state).await;
+    heartbeat.abort();
     release_service_lease(state, "webhook-delivery-coordinator", &holder).await;
     result
 }
@@ -1079,6 +1095,7 @@ async fn webhook_tick_inner(state: &AppState) -> anyhow::Result<()> {
         let response = state
             .http
             .post(&url)
+            .timeout(StdDuration::from_secs(10))
             .header("content-type", "application/json")
             .header("flowpay-signature", signature)
             .header("flowpay-event-id", &event_public_id)
@@ -1182,7 +1199,14 @@ async fn agent_tick(state: &AppState) -> anyhow::Result<()> {
     else {
         return Ok(());
     };
+    let heartbeat = spawn_lease_heartbeat(
+        state.clone(),
+        "agent-recovery-coordinator",
+        holder.clone(),
+        180,
+    );
     let result = agent_tick_inner(state).await;
+    heartbeat.abort();
     release_service_lease(state, "agent-recovery-coordinator", &holder).await;
     result
 }
@@ -1547,6 +1571,38 @@ async fn try_acquire_service_lease(
         "INSERT INTO service_leases(lease_key,holder_id,expires_at) VALUES($1,$2,now()+make_interval(secs => $3)) ON CONFLICT(lease_key) DO UPDATE SET holder_id=EXCLUDED.holder_id,expires_at=EXCLUDED.expires_at,updated_at=now() WHERE service_leases.expires_at<now() RETURNING holder_id"
     ).bind(key).bind(&holder).bind(ttl_seconds).fetch_optional(state.store.pool()).await?;
     Ok(acquired.map(|_| holder))
+}
+
+fn spawn_lease_heartbeat(
+    state: AppState,
+    key: &'static str,
+    holder: String,
+    ttl_seconds: i64,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let interval = (ttl_seconds.max(30) / 3) as u64;
+        loop {
+            tokio::time::sleep(StdDuration::from_secs(interval)).await;
+            let result = sqlx::query(
+                "UPDATE service_leases SET expires_at=now()+make_interval(secs => $3),updated_at=now() WHERE lease_key=$1 AND holder_id=$2",
+            )
+            .bind(key)
+            .bind(&holder)
+            .bind(ttl_seconds)
+            .execute(state.store.pool())
+            .await;
+            match result {
+                Ok(result) if result.rows_affected() == 1 => {}
+                Ok(_) => {
+                    warn!(lease_key=%key, "service lease heartbeat lost ownership");
+                    break;
+                }
+                Err(error) => {
+                    warn!(lease_key=%key, error=%error, "service lease heartbeat failed");
+                }
+            }
+        }
+    })
 }
 
 async fn release_service_lease(state: &AppState, key: &str, holder: &str) {
