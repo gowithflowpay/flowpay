@@ -5,7 +5,7 @@ import {useCallback,useEffect,useMemo,useState} from "react";
 import {Brand,LanguageButton} from "../../components/Brand";
 import {
   ArrowLeftIcon,CheckIcon,ClockIcon,CopyIcon,HeadphonesIcon,
-  InfoIcon,LifebuoyIcon,ShieldIcon
+  InfoIcon,LifebuoyIcon,ShieldIcon,StoreIcon
 } from "../../components/Icons";
 import {QrCode} from "../../components/QrCode";
 
@@ -94,13 +94,17 @@ export function CheckoutClient({paymentId,home=false,suppressOutcome=false,initi
   const load=useCallback(async()=>{
     try{
       const response=await fetch(`/api/payment/${encodeURIComponent(paymentId)}`,{cache:"no-store"});
-      const body=await response.json();
+      const raw=await response.text();
+      let body:any={};
+      try{body=raw?JSON.parse(raw):{}}catch{body={error:response.ok?"Checkout returned an invalid response":"Payment is unavailable in this environment"}}
       if(!response.ok)throw new Error(body?.error||"Unable to load payment");
       setPayment(body);
       setError("");
       const depositsResponse=await fetch(`/api/payment/${encodeURIComponent(paymentId)}/deposits`,{cache:"no-store"});
       if(depositsResponse.ok){
-        const depositBody=await depositsResponse.json();
+        const depositText=await depositsResponse.text();
+        let depositBody:any={};
+        try{depositBody=depositText?JSON.parse(depositText):{}}catch{}
         setDeposits(Array.isArray(depositBody.data)?depositBody.data:[]);
       }
     }catch(err){
@@ -197,13 +201,19 @@ export function CheckoutClient({paymentId,home=false,suppressOutcome=false,initi
   const canClaim=!isDone;
 
   return <main className={`checkout-shell${home?" checkout-preview":""}`}>
-    <header className="payment-header reference-header"><Brand/><span/><div className="checkout-header-actions"><LanguageButton/><button className="checkout-theme" type="button" aria-label="Display settings">☼</button></div></header>
+    <header className="payment-header reference-header"><Brand/><span/><div className="checkout-header-actions"><button className="checkout-store" type="button"><StoreIcon/>{merchantName(payment)} <span>⌄</span></button></div></header>
     <section className="reference-checkout" aria-labelledby="payment-title">
       <div className="reference-summary"><div className="reference-summary-inner">
-        <span className="paying-label">Paying {merchantName(payment)}</span>
-        <h1 id="payment-title"><strong>{amountDisplay(payment.amount,payment.asset)}</strong><small>{payment.asset}</small></h1>
+        <span className="checkout-kicker">Checkout</span><span className="paying-label"><StoreIcon/>{merchantName(payment)}</span>
+        <h2 className="complete-title">Complete payment</h2><h1 id="payment-title"><strong>{amountDisplay(payment.amount,payment.asset)}</strong><small>{payment.asset}</small></h1>
         {stableAssets.has(payment.asset.toUpperCase())?<p>≈ {dollarDisplay(payment.amount,payment.asset)} USD</p>:null}
         <details className="reference-network"><summary><Image src={network.asset} width={24} height={24} alt=""/><strong>{network.label}</strong><span className="network-chevron">⌄</span></summary></details>
+        <p className="send-instruction">Send exactly {amountDisplay(payment.amount,payment.asset)} {payment.asset} to the address below</p>
+        <div className="reference-address" title={payment.address}><code>{shortAddress(payment.address)}</code><button type="button" onClick={()=>void copy()} aria-label="Copy payment address"><CopyIcon/></button></div>
+        {copied?<span className="reference-copied" role="status">Address copied</span>:null}
+        <div className="reference-warning"><InfoIcon/><p><strong>Use {network.label} network only</strong><span>Other assets or networks may be lost.</span></p></div>
+        <span className="payment-status-label">Payment status</span>
+        <div className={`reference-status status-${status.toLowerCase()}`} role="status" aria-live="polite"><span>{isDone?<CheckIcon/>:<ClockIcon/>}</span><p><strong>{statusTitle}</strong><small>{statusText}</small></p><b>{time} left</b></div>
         <div className="secure-copy"><ShieldIcon/><p><strong>Your payment is secure and encrypted.</strong><span>We never store your funds.</span></p></div>
         <div className="summary-rule"/>
         <div className="expiry-copy"><ClockIcon/><p><span>Payment expires in</span><strong>{time}</strong></p></div>
@@ -211,10 +221,7 @@ export function CheckoutClient({paymentId,home=false,suppressOutcome=false,initi
       <div className="reference-payment"><div className="reference-payment-inner">
         <h2>Send <strong>{amountDisplay(payment.amount,payment.asset)} {payment.asset}</strong> to the address below</h2>
         <div className="reference-qr"><div className="reference-qr-frame"><QrCode value={payment.address}/><div className="reference-qr-brand"><Image src="/assets/flowpay-mark.svg" width={40} height={40} alt="FlowPay"/></div></div></div>
-        <div className="reference-address" title={payment.address}><code>{shortAddress(payment.address)}</code><button type="button" onClick={()=>void copy()} aria-label="Copy payment address"><CopyIcon/></button></div>
-        {copied?<span className="reference-copied" role="status">Address copied</span>:null}
-        <div className="reference-warning"><InfoIcon/><p><strong>Only send {payment.asset} on {network.label}.</strong><span>Other assets or networks may be lost.</span></p></div>
-        <div className={`reference-status status-${status.toLowerCase()}`} role="status" aria-live="polite"><span>{isDone?<CheckIcon/>:<ClockIcon/>}</span><p><strong>{statusTitle}</strong><small>{statusText}{deposits.length>0&&status==="PARTIALLY_PAID"?` ${deposits.length} deposits detected.`:""}</small></p></div>
+        <p className="qr-caption">Scan to pay with <strong>{network.label}</strong></p>
       </div></div>
 
     </section>

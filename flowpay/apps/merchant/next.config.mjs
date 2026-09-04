@@ -8,6 +8,7 @@ loadEnvConfig(projectRoot);
 
 /** @type {import("next").NextConfig} */
 const nextConfig = {
+  distDir: process.env.FLOWPAY_NEXT_DIST_DIR || ".next",
   outputFileTracingRoot: process.env.VERCEL ? process.cwd() : projectRoot,
   async rewrites() {
     const checkoutBase=(process.env.FLOWPAY_CHECKOUT_BASE_URL||"http://localhost:3001").replace(/\/$/,"");

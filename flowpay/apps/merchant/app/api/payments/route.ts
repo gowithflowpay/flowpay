@@ -14,6 +14,10 @@ export async function POST(request:Request){
         reference:String(formData.get("reference")??"")||undefined,
       }),
     });
+    const requestUrl=new URL(request.url);
+    if(["localhost","127.0.0.1"].includes(requestUrl.hostname)&&result?.id){
+      result.checkout_url=`http://localhost:3001/pay/${encodeURIComponent(result.id)}`;
+    }
     if(request.headers.get("accept")?.includes("application/json"))return NextResponse.json(result,{status:201});
     return NextResponse.redirect(new URL(`/payments?created=${encodeURIComponent(result.id)}`,request.url),303);
   }catch(error){

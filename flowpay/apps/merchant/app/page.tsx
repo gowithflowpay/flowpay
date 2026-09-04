@@ -1,43 +1,77 @@
-import type {ReactNode} from "react";
 import {api} from "../lib/api";
-import {moneyFromStableBalances,short,statusTone,tokenAsset} from "../lib/format";
-import {ArrowRightIcon,CircleCheckIcon,ClockIcon,LinkIcon,PlusIcon,VolumeIcon} from "./components/Icons";
+import {moneyFromStableBalances,statusTone} from "../lib/format";
+import {AlertIcon,ArrowRightIcon,CircleCheckIcon,ClockIcon,LinkIcon,PaymentIcon,WalletIcon} from "./components/Icons";
 
-const terminalPaymentStatuses=new Set(["COMPLETED","FAILED","EXPIRED","CANCELLED"]);
-const terminalClaimStatuses=new Set(["RECOVERED","REJECTED","NOT_RECOVERABLE"]);
+const terminal=new Set(["COMPLETED","FAILED","EXPIRED","CANCELLED","RECOVERED"]);
 
-export default async function Overview(){
+export default async function Dashboard(){
+  let payments:any[]=[];
+  let balance="—";
+  let unavailable=false;
   try{
-    const [overview,paymentsResult,claimsResult]=await Promise.all([api("/v1/merchant/overview"),api("/v1/payments?limit=6"),api("/v1/claims?limit=4").catch(()=>({data:[]}))]);
-    const payments=paymentsResult?.data??[],claims=claimsResult?.data??[],balances=overview?.balances??[];
-    const completed=Number(overview?.payments?.completed??0);
-    const pending=payments.filter((payment:any)=>!terminalPaymentStatuses.has(String(payment?.status??""))).length;
-    const links=payments.filter((payment:any)=>payment?.checkout_url||payment?.address).length;
-    const attentionClaims=claims.filter((claim:any)=>!terminalClaimStatuses.has(String(claim?.status??"")));
-    return <div className="overview-page">
-      <header className="overview-titlebar"><div><h1>Overview</h1><p>Monitor payments, links, and recovery activity.</p></div><a className="btn primary overview-cta" href="/payments/new"><PlusIcon/>Create payment link</a></header>
-      <section className="overview-metrics" aria-label="Payment summary">
-        <Metric icon={<VolumeIcon/>} label="Total volume" value={moneyFromStableBalances(balances)}/>
-        <Metric icon={<CircleCheckIcon/>} label="Successful payments" value={completed}/>
-        <Metric icon={<ClockIcon/>} label="Pending payments" value={pending}/>
-        <Metric icon={<LinkIcon/>} label="Active payment links" value={links}/>
+    const [overview,result]=await Promise.all([api("/v1/merchant/overview"),api("/v1/payments?limit=100")]);
+    payments=result?.data??[];
+    balance=moneyFromStableBalances(overview?.balances??[]);
+  }catch{unavailable=true}
+
+  const recent=payments.slice(0,5);
+  const stats=monthlyStats(payments);
+
+  return <div className="dashboard-page">
+    <section className="welcome-row">
+      <div><h1>Welcome back, Acme Store <span aria-hidden="true">👋</span></h1><p>Here&apos;s what&apos;s happening with your business today.</p></div>
+      <a className="create-payment" href="/payments/new"><LinkIcon/>Create payment link</a>
+    </section>
+    {unavailable?<p className="data-notice" role="status">Live payment data is unavailable. The API on port 8080 is offline.</p>:null}
+
+    <div className="dashboard-summary-grid">
+      <section className="balance-card">
+        <div className="balance-copy"><span>Available balance</span><strong>{balance}</strong><p><img src="/assets/usdc.svg" alt=""/>{balance==="—"?"Unable to load USDC balance":`≈ ${balance.replace("$","")} USDC`}</p></div>
+        <div className="balance-actions"><a href="/claims">Transfer funds</a><a href="/payments">View balance details</a></div>
       </section>
-      <div className="overview-content">
-        <section className="overview-card payments-card"><div className="overview-card-head"><div><h2>Recent payments</h2><p>Your latest payment activity</p></div><a href="/payments">View all <ArrowRightIcon/></a></div>
-          <div className="overview-payment-list"><div className="overview-payment-header"><span>Payment</span><span>Reference</span><span>Amount</span><span>Status</span><span>Date</span></div>
-            {payments.map((payment:any)=>{const status=String(payment?.status??"UNKNOWN");return <a className="overview-payment-row" href={`/payments/${payment?.id}`} key={payment?.id}><span className="payment-primary"><span className="asset-mark"><img src={tokenAsset(payment?.asset??"USDC")} alt=""/></span><span><strong>{short(payment?.id,8,4)}</strong><small>{payment?.asset??"Asset"} payment</small></span></span><span className="payment-reference">{payment?.reference??"No reference"}</span><strong className="payment-amount">{payment?.amount??"—"} <small>{payment?.asset??""}</small></strong><span><span className={`status ${statusTone(status)}`}>{humanize(status)}</span></span><time>{formatDate(payment?.updated_at??payment?.created_at??payment?.expires_at)}</time></a>})}
-            {payments.length===0?<div className="overview-empty"><strong>No payments yet</strong><span>Create a payment link to start accepting payments.</span></div>:null}
-          </div>
-        </section>
-        <aside className="overview-card claims-card"><div className="overview-card-head"><div><h2>Recent claims</h2><p>Recovery activity</p></div><a href="/claims">View all <ArrowRightIcon/></a></div><div className="claims-summary"><strong>{attentionClaims.length}</strong><span>requiring attention</span></div>
-          <div className="claim-list">{claims.slice(0,3).map((claim:any)=>{const status=String(claim?.status??"UNKNOWN");return <a href={`/claims/${claim?.id}`} className="claim-row" key={claim?.id}><span className="claim-status-mark" data-tone={statusTone(status)}/><span><strong>{claim?.actual_asset??"Asset"} on {humanize(claim?.actual_chain??"Unknown network")}</strong><small>{short(claim?.id,7,4)}</small></span><span className={`status ${statusTone(status)}`}>{humanize(status)}</span></a>})}{claims.length===0?<div className="claims-empty"><span className="claims-check"><CircleCheckIcon/></span><strong>No claims need attention</strong><p>Recovery cases will appear here when action is required.</p></div>:null}</div>
-          <a className="claims-footer" href="/claims">Open claims center <ArrowRightIcon/></a>
-        </aside>
+      <section className="payments-total-card">
+        <div className="payments-total-heading"><span>Total payments</span><i title="Completed payments received this month">i</i></div>
+        <button type="button">This month <span>⌄</span></button>
+        <div className="payments-total-content">
+          <div><strong>{formatMoney(stats.current)}</strong><p className={stats.change>=0?"positive":"negative"}>{stats.change>=0?"↑":"↓"} {Math.abs(stats.change).toFixed(1)}% <span>from last month</span></p></div>
+          <svg className="payments-chart" viewBox="0 0 190 100" role="img" aria-label="Payments trend">
+            <defs><linearGradient id="chartFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#6c5ce7" stopOpacity=".22"/><stop offset="1" stopColor="#6c5ce7" stopOpacity="0"/></linearGradient></defs>
+            <path className="chart-area" d="M4 88 C26 86 29 65 49 64 S72 75 89 52 S112 49 124 35 S148 35 160 13 S178 13 186 5 L186 100 L4 100 Z"/>
+            <path className="chart-line" d="M4 88 C26 86 29 65 49 64 S72 75 89 52 S112 49 124 35 S148 35 160 13 S178 13 186 5"/>
+            <circle cx="186" cy="5" r="4"/>
+          </svg>
+        </div>
+      </section>
+    </div>
+
+    <section className="activity-card">
+      <header><h2>Recent activity</h2><a href="/payments">View all <ArrowRightIcon/></a></header>
+      <div className="activity-tabs"><b>Recent transfers</b><a href="/payments">Recent payments</a></div>
+      <div className="activity-table"><div className="activity-head"><span>Type</span><span>Description</span><span>Status</span><span>Date</span><span>Amount</span></div>
+        {recent.map((p:any)=>{const status=String(p.status??"WAITING");return <a className="activity-row" href={`/payments/${p.id}`} key={p.id}><span className="activity-icon">{terminal.has(status)?<PaymentIcon/>:<WalletIcon/>}</span><strong>{p.reference||`${p.asset} payment`}</strong><span className={`activity-status ${statusTone(status)}`}>{statusIcon(status)}{humanize(status)}</span><time>{formatDate(p.updated_at??p.created_at)}</time><b>{p.amount} {p.asset}</b></a>})}
+        {recent.length===0?<div className="activity-empty">{unavailable?"Transfers will appear when the FlowPay API is running.":"No payment activity yet."}</div>:null}
       </div>
-    </div>;
-  }catch(error){return <div className="overview-page"><header className="overview-titlebar"><div><h1>Overview</h1><p>{error instanceof Error?error.message:"Failed to load overview."}</p></div><a className="btn primary" href="/payments/new"><PlusIcon/>Create payment link</a></header></div>}
+      <a className="activity-footer" href="/payments">View all activity <ArrowRightIcon/></a>
+    </section>
+  </div>
 }
 
-function Metric({icon,label,value}:{icon:ReactNode,label:string,value:string|number}){return <article className="overview-metric"><div className="overview-metric-top"><span className="overview-metric-label">{label}</span><span className="overview-metric-icon">{icon}</span></div><strong className="overview-metric-value">{value}</strong></article>}
-function humanize(value:string){return value.replaceAll("_"," ").toLowerCase().replace(/(^|\s)\S/g,letter=>letter.toUpperCase())}
-function formatDate(value:any){if(!value)return "—";const date=new Date(value);return Number.isNaN(date.getTime())?"—":new Intl.DateTimeFormat("en-US",{month:"short",day:"numeric",year:"numeric"}).format(date)}
+function humanize(v:string){return v.replaceAll("_"," ").toLowerCase().replace(/(^|\s)\S/g,x=>x.toUpperCase())}
+function statusIcon(status:string){if(["COMPLETED","RECOVERED","CONFIRMED"].includes(status))return <CircleCheckIcon/>;if(["EXPIRED","FAILED","CANCELLED"].includes(status))return <AlertIcon/>;return <ClockIcon/>}
+function formatDate(v:any){if(!v)return "—";const d=new Date(v);if(Number.isNaN(d.getTime()))return "—";return <>{new Intl.DateTimeFormat("en-US",{month:"short",day:"numeric",year:"numeric"}).format(d)}<small>{new Intl.DateTimeFormat("en-US",{hour:"numeric",minute:"2-digit"}).format(d)}</small></>}
+function formatMoney(amount:number){return new Intl.NumberFormat("en-US",{style:"currency",currency:"USD",minimumFractionDigits:2}).format(amount)}
+function monthlyStats(payments:any[]){
+  const now=new Date();
+  const currentStart=new Date(now.getFullYear(),now.getMonth(),1).getTime();
+  const previousStart=new Date(now.getFullYear(),now.getMonth()-1,1).getTime();
+  let current=0,previous=0;
+  for(const payment of payments){
+    if(!["COMPLETED","RECOVERED","CONFIRMED"].includes(String(payment.status??"")))continue;
+    const when=new Date(payment.updated_at??payment.created_at??0).getTime();
+    const amount=Number(payment.amount??0);
+    if(!Number.isFinite(when)||!Number.isFinite(amount))continue;
+    if(when>=currentStart)current+=amount;else if(when>=previousStart)previous+=amount;
+  }
+  const change=previous>0?((current-previous)/previous)*100:current>0?100:0;
+  return {current,change};
+}
