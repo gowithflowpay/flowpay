@@ -1157,7 +1157,24 @@ async fn agent_tick_inner(state: &AppState) -> anyhow::Result<()> {
                     DatabaseAgentTools::new(state.clone()),
                     OpenAiResponsesClient::new(cfg),
                 );
-                agent.investigate(&ctx).await
+                match agent.investigate(&ctx).await {
+                    Ok(mut model_result)
+                        if matches!(model_result.status, AgentRunStatus::Escalated) =>
+                    {
+                        match SafetyFirstAgent::new(DatabaseAgentTools::new(state.clone()))
+                            .investigate(&ctx)
+                            .await
+                        {
+                            Ok(mut verified) => {
+                                model_result.trajectory.append(&mut verified.trajectory);
+                                verified.trajectory = model_result.trajectory;
+                                Ok(verified)
+                            }
+                            Err(error) => Err(error),
+                        }
+                    }
+                    result => result,
+                }
             } else {
                 SafetyFirstAgent::new(DatabaseAgentTools::new(state.clone()))
                     .investigate(&ctx)

@@ -1,39 +1,60 @@
 import "server-only";
-import {existsSync,readFileSync} from "node:fs";
-import path from "node:path";
+import {cookies} from "next/headers";
+import {SESSION_COOKIE} from "./cookies";
 
-function envFileValue(name:string){
-  const configuredFile=process.env.FLOWPAY_ENV_FILE;
-  const files=[
-    configuredFile,
-    path.resolve(process.cwd(),".env"),
-    path.resolve(process.cwd(),"../..", ".env"),
-  ].filter((value):value is string=>Boolean(value));
-  for(const file of files){
-    if(!existsSync(file))continue;
-    const line=readFileSync(file,"utf8").split(/\r?\n/).find(value=>new RegExp(`^\\s*${name}\\s*=`).test(value));
-    if(!line)continue;
-    return line.slice(line.indexOf("=")+1).trim().replace(/^(["'])(.*)\1$/,"$2");
+/** An error carrying the API's own status so callers can react to 401s. */
+export class ApiError extends Error{
+  status:number;
+  code?:string;
+  constructor(message:string,status:number,code?:string){
+    super(message);
+    this.name="ApiError";
+    this.status=status;
+    this.code=code;
   }
-  return undefined;
 }
 
-function systemApiKey(){
-  // One server-only system credential. The browser and payment form never see it.
-  const key=(process.env.FLOWPAY_API_KEY??envFileValue("FLOWPAY_API_KEY"))?.trim();
-  if(!key)throw new Error("FLOWPAY_API_KEY is required on the merchant server");
-  return key;
+function apiBase(){
+  return (process.env.FLOWPAY_API_URL??"http://127.0.0.1:8080").replace(/\/$/,"");
 }
 
-export async function api(pathname:string,init:RequestInit={}){
-  const base=(process.env.FLOWPAY_API_URL??"http://127.0.0.1:8080").replace(/\/$/,"");
-  const h=new Headers(init.headers as HeadersInit|undefined);
-  h.set("content-type","application/json");
-  h.set("x-flowpay-api-key",systemApiKey());
-  const r=await fetch(base+pathname,{...init,cache:"no-store",headers:h});
-  const text=await r.text();
-  let data:any={};
-  try{data=text?JSON.parse(text):{};}catch{data={raw:text};}
-  if(!r.ok)throw new Error(data?.error?.message??`FlowPay API ${r.status}`);
+async function readBody(response:Response){
+  const text=await response.text();
+  try{return text?JSON.parse(text):{};}catch{return {raw:text};}
+}
+
+async function send(pathname:string,init:RequestInit,token:string|null){
+  const headers=new Headers(init.headers as HeadersInit|undefined);
+  headers.set("content-type","application/json");
+  if(token)headers.set("authorization",`Bearer ${token}`);
+  const response=await fetch(apiBase()+pathname,{...init,cache:"no-store",headers});
+  const data=await readBody(response);
+  if(!response.ok){
+    const error=data?.error;
+    throw new ApiError(error?.message??`FlowPay API ${response.status}`,response.status,error?.code);
+  }
   return data;
+}
+
+/** The signed-in merchant's session token, or null when signed out. */
+export async function sessionToken(){
+  const store=await cookies();
+  return store.get(SESSION_COOKIE)?.value??null;
+}
+
+/** Calls the FlowPay API as the merchant holding the current session. */
+export async function api(pathname:string,init:RequestInit={}){
+  const token=await sessionToken();
+  if(!token)throw new ApiError("Your session has ended. Please sign in again.",401,"no_session");
+  return send(pathname,init,token);
+}
+
+/** Calls an endpoint that does not require a session (signup, login, verify). */
+export async function apiPublic(pathname:string,init:RequestInit={}){
+  return send(pathname,init,null);
+}
+
+/** Like {@link apiPublic}, but authenticates with an explicit bearer token. */
+export async function apiWithToken(pathname:string,init:RequestInit,token:string){
+  return send(pathname,init,token);
 }

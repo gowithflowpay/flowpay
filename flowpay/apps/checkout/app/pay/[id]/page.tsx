@@ -10,8 +10,8 @@ export default async function PaymentPage({params,searchParams}:{params:Promise<
   let initialDeposits:Deposit[]=[];
   try{
     const [payment,deposits]=await Promise.all([
-      api(`/v1/payments/${encodeURIComponent(id)}`),
-      api(`/v1/payments/${encodeURIComponent(id)}/deposits`),
+      api(`/v1/public/payments/${encodeURIComponent(id)}`),
+      api(`/v1/public/payments/${encodeURIComponent(id)}/deposits`),
     ]);
     initialPayment=payment as Payment;
     initialDeposits=Array.isArray(deposits?.data)?deposits.data as Deposit[]:[];

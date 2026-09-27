@@ -5,7 +5,7 @@ use flowpay_chains::{
     CounterfactualEvmAdapter, FactoryVerification, PreparedTransaction, SimulationResult,
     TokenMetadata, TransactionReceipt, TransferEvent,
 };
-use flowpay_domain::{AddressRef, AtomicAmount};
+use flowpay_domain::{AddressRef, AtomicAmount, ChainKey};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -306,6 +306,64 @@ impl ChainAdapter for RpcEvmAdapter {
                         amount: tx.native_value,
                     });
                 }
+            } else if let Ok(trace) = self
+                .rpc(
+                    "debug_traceTransaction",
+                    json!([hash, {"tracer":"callTracer"}]),
+                )
+                .await
+            {
+                fn collect_native_calls(
+                    trace: &Value,
+                    chain: &ChainKey,
+                    tx_hash: &str,
+                    block_number: u64,
+                    block_hash: &str,
+                    transfers: &mut Vec<TransferEvent>,
+                ) -> Result<(), ChainError> {
+                    let value = trace.get("value").and_then(Value::as_str).unwrap_or("0x0");
+                    let amount = AtomicAmount::from_hex_quantity(value)
+                        .map_err(|error| ChainError::InvalidData(error.to_string()))?;
+                    if !amount.is_zero() {
+                        if let (Some(from), Some(to)) = (
+                            trace.get("from").and_then(Value::as_str),
+                            trace.get("to").and_then(Value::as_str),
+                        ) {
+                            transfers.push(TransferEvent {
+                                chain: chain.clone(),
+                                tx_hash: tx_hash.to_owned(),
+                                block_number,
+                                block_hash: block_hash.to_owned(),
+                                log_index: None,
+                                from: from.to_owned(),
+                                to: to.to_owned(),
+                                token_contract: None,
+                                amount,
+                            });
+                        }
+                    }
+                    if let Some(calls) = trace.get("calls").and_then(Value::as_array) {
+                        for call in calls {
+                            collect_native_calls(
+                                call,
+                                chain,
+                                tx_hash,
+                                block_number,
+                                block_hash,
+                                transfers,
+                            )?;
+                        }
+                    }
+                    Ok(())
+                }
+                collect_native_calls(
+                    &trace,
+                    &self.identity.key,
+                    &r.transaction_hash,
+                    quantity_u64(&r.block_number)?,
+                    &r.block_hash,
+                    &mut out,
+                )?;
             }
         }
         Ok(out)

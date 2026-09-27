@@ -255,3 +255,7 @@ Model mode requires the configured local Ollama model. Ollama is the only suppor
 ## Documentation
 
 Start with `docs/architecture.md`, `docs/threat-model.md`, `docs/create3.md`, `docs/agent.md`, `docs/messaging.md`, `docs/evaluation.md`, and `docs/reproduction.md`.
+
+## AI-assisted site integration
+
+`apps/mcp` exposes project inspection, Next.js installation, and verification tools over MCP. ChatGPT, Codex, Claude, and other MCP clients can generate a complete FlowPay crypto checkout while the merchant credential stays inside the MCP process and is written directly to the target project's `.env.local`. See `apps/mcp/README.md` for configuration.

@@ -1,4 +1,8 @@
-use crate::{config::Config, error::ApiError, state::AppState};
+use crate::{
+    config::{ChainConfig, Config},
+    error::ApiError,
+    state::AppState,
+};
 use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
@@ -16,6 +20,7 @@ use flowpay_messaging::{enqueue_command_tx, enqueue_domain_event_tx};
 use flowpay_payments::derive_checkout_salt;
 use flowpay_persistence::{CheckoutAddressRecord, StoreError, StoredClaim};
 use hmac::{Hmac, Mac};
+use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -32,6 +37,11 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/providers/alchemy/webhook", post(alchemy_webhook))
         .route("/v1/payments", get(list_payments).post(create_payment))
         .route("/v1/payments/{id}", get(get_payment))
+        .route("/v1/public/payments/{id}", get(public_payment))
+        .route(
+            "/v1/public/payments/{id}/deposits",
+            get(public_payment_deposits),
+        )
         .route("/v1/payments/{id}/cancel", post(cancel_payment))
         .route(
             "/v1/payments/{id}/retry-settlement",
@@ -43,6 +53,10 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/claims/{id}/evidence", post(add_evidence))
         .route("/v1/claims/{id}/authorize", post(authorize_claim))
         .route("/v1/claims/{id}/retry", post(retry_claim))
+        .route(
+            "/v1/claims/{id}/investigate",
+            post(start_claim_investigation),
+        )
         .route("/v1/claims/{id}/fund", post(fund_claim))
         .route("/v1/claims/{id}/approve", post(approve_claim))
         .route("/v1/webhooks", get(list_webhooks).post(create_webhook))
@@ -52,6 +66,16 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/logs", get(list_logs))
         .route("/v1/overview", get(get_overview))
         .route("/v1/merchant/overview", get(get_overview))
+        .route(
+            "/v1/auth/signup",
+            post(signup),
+        )
+        .route("/v1/auth/verify", post(verify_email))
+        .route("/v1/auth/resend", post(resend_code))
+        .route("/v1/auth/login", post(login))
+        .route("/v1/auth/logout", post(logout))
+        .route("/v1/auth/session", get(current_session))
+        .route("/v1/auth/onboarding", post(complete_onboarding))
         .route("/v1/agent/chat", post(agent_chat))
         .with_state(state)
 }
@@ -178,6 +202,23 @@ struct PaymentResponse {
     reference: Option<String>,
     merchant_name: Option<String>,
     checkout_url: String,
+    #[serde(default)]
+    payment_method: Option<String>,
+    #[serde(default)]
+    bank_name: Option<String>,
+    #[serde(default)]
+    account_name: Option<String>,
+    #[serde(default)]
+    account_expires_at: Option<String>,
+    /// What the merchant asked for, before fee pass-through (NGN only).
+    #[serde(default)]
+    merchant_amount: Option<String>,
+    /// Flat platform fee bundled into the total (NGN only).
+    #[serde(default)]
+    platform_fee: Option<String>,
+    /// Flutterwave fee bundled into the total, so the customer absorbs it.
+    #[serde(default)]
+    estimated_provider_fee: Option<String>,
 }
 
 async fn create_payment(
@@ -200,6 +241,9 @@ async fn create_payment(
             "invalid_reference",
             "reference must be <= 160 characters",
         ));
+    }
+    if req.asset.eq_ignore_ascii_case("NGN") || req.chain.to_ascii_lowercase().contains("flutterwave") {
+        return Err(ApiError::bad("unsupported_asset", "FlowPay accepts crypto assets only"));
     }
     let chain = ChainKey::from_str(&req.chain)
         .map_err(|_| ApiError::bad("unsupported_chain", "unsupported chain"))?;
@@ -272,7 +316,7 @@ async fn create_payment(
     }
     register_checkout_with_alchemy(&state, &address).await?;
     let expires = OffsetDateTime::now_utc()
-        + Duration::seconds(req.expires_in_seconds.unwrap_or(1800).clamp(60, 86_400));
+        + Duration::seconds(req.expires_in_seconds.unwrap_or(1800).clamp(60, 2_592_000));
     let overpayment = parse_overpayment(req.overpayment_policy.as_deref())?;
     let payment = Payment {
         id: payment_id,
@@ -318,6 +362,13 @@ async fn create_payment(
         reference: req.reference,
         merchant_name: Some(merchant_name),
         checkout_url,
+        payment_method: None,
+        bank_name: None,
+        account_name: None,
+        account_expires_at: None,
+        merchant_amount: None,
+        platform_fee: None,
+        estimated_provider_fee: None,
     };
     store_idempotent_response(
         &state,
@@ -340,6 +391,591 @@ async fn create_payment(
     )
     .await?;
     Ok((StatusCode::CREATED, Json(response)))
+}
+
+async fn create_ngn_payment(
+    state: AppState,
+    merchant: MerchantId,
+    idem: String,
+    request_hash: String,
+    req: CreatePaymentRequest,
+) -> Result<(StatusCode, Json<PaymentResponse>), ApiError> {
+    let secret = state
+        .config
+        .flutterwave_secret_key
+        .as_deref()
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "flutterwave_not_configured",
+                "Flutterwave is not configured",
+            )
+        })?;
+    let email = state.config.flutterwave_customer_email.trim();
+    let amount = AtomicAmount::from_decimal(&req.amount, 2)
+        .map_err(|e| ApiError::bad("invalid_amount", e.to_string()))?;
+    if amount.is_zero() {
+        return Err(ApiError::bad(
+            "invalid_amount",
+            "amount must be greater than zero",
+        ));
+    }
+    // The customer covers the platform fee and Flutterwave's cut, so the
+    // merchant still nets exactly the amount they asked for.
+    let platform_fee = AtomicAmount::from_biguint(BigUint::from(
+        state.config.ngn_platform_fee_atomic,
+    ));
+    let charge_total = ngn_charge_total(
+        &amount,
+        &platform_fee,
+        state.config.flutterwave_fee_bps,
+        state.config.flutterwave_fee_vat_bps,
+    );
+    let provider_fee_estimate = ngn_fee_component(
+        &charge_total,
+        &AtomicAmount::from_biguint(amount.inner() + platform_fee.inner()),
+    );
+    let payment_id = PaymentId::new();
+    let public_id = format!("pay_{}", payment_id.0.simple());
+    let expires_in = req.expires_in_seconds.unwrap_or(3600).clamp(60, 5_270_400);
+    let expires = OffsetDateTime::now_utc() + Duration::seconds(expires_in);
+    let firstname = state.config.flutterwave_customer_first_name.trim();
+    let lastname = state.config.flutterwave_customer_last_name.trim();
+    let provider_response = state
+        .http
+        .post(format!(
+            "{}/virtual-account-numbers",
+            state.config.flutterwave_base_url
+        ))
+        .timeout(StdDuration::from_secs(20))
+        .bearer_auth(secret)
+        .json(&json!({
+            "email": email,
+            "tx_ref": public_id,
+            "amount": serde_json::from_str::<Value>(&charge_total.to_decimal(2)).map_err(internal)?,
+            "currency": "NGN",
+            "firstname": firstname,
+            "lastname": lastname,
+            "is_permanent": false,
+            "expires": expires_in.to_string(),
+            "narration": "FlowPay payment"
+        }))
+        .send()
+        .await
+        .map_err(|error| {
+            ApiError::new(
+                StatusCode::BAD_GATEWAY,
+                "flutterwave_unavailable",
+                error.to_string(),
+            )
+        })?;
+    let provider_status = provider_response.status();
+    let provider_body: Value = provider_response.json().await.map_err(|_| {
+        ApiError::new(
+            StatusCode::BAD_GATEWAY,
+            "invalid_flutterwave_response",
+            "Flutterwave returned invalid JSON",
+        )
+    })?;
+    if !provider_status.is_success()
+        || provider_body.get("status").and_then(Value::as_str) != Some("success")
+    {
+        sqlx::query("DELETE FROM idempotency_keys WHERE merchant_id=$1 AND api_scope='POST:/v1/payments' AND idempotency_key=$2 AND response_body IS NULL")
+            .bind(merchant.0).bind(&idem).execute(state.store.pool()).await.map_err(db)?;
+        return Err(ApiError::new(
+            StatusCode::BAD_GATEWAY,
+            "flutterwave_account_creation_failed",
+            "Flutterwave could not create the temporary account",
+        ));
+    }
+    let data = provider_body.get("data").cloned().unwrap_or(Value::Null);
+    let account_number = data
+        .get("account_number")
+        .and_then(Value::as_str)
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::BAD_GATEWAY,
+                "invalid_flutterwave_response",
+                "Flutterwave returned no account number",
+            )
+        })?;
+    let bank_name = data
+        .get("bank_name")
+        .and_then(Value::as_str)
+        .unwrap_or("Flutterwave MFB");
+    let provider_reference = data
+        .get("order_ref")
+        .or_else(|| data.get("flw_ref"))
+        .and_then(Value::as_str)
+        .unwrap_or(&public_id);
+    let merchant_name: String = sqlx::query_scalar("SELECT name FROM merchants WHERE id=$1")
+        .bind(merchant.0)
+        .fetch_one(state.store.pool())
+        .await
+        .map_err(db)?;
+    let checkout_url = format!("{}/pay/{}", state.config.checkout_base_url, public_id);
+    let response = PaymentResponse {
+        id: public_id.clone(),
+        address: account_number.to_owned(),
+        amount: charge_total.to_decimal(2),
+        amount_atomic: charge_total.to_string(),
+        asset: "NGN".into(),
+        chain: "custom:flutterwave_ngn".into(),
+        status: "WAITING".into(),
+        expires_at: expires.to_string(),
+        reference: req.reference.clone(),
+        merchant_name: Some(merchant_name),
+        checkout_url,
+        payment_method: Some("bank_transfer".into()),
+        bank_name: Some(bank_name.to_owned()),
+        account_name: data
+            .get("account_name")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        account_expires_at: data
+            .get("expiry_date")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| Some(expires.to_string())),
+        merchant_amount: Some(amount.to_decimal(2)),
+        platform_fee: Some(platform_fee.to_decimal(2)),
+        estimated_provider_fee: Some(provider_fee_estimate.to_decimal(2)),
+    };
+    let mut tx = state.store.pool().begin().await.map_err(db)?;
+    sqlx::query("INSERT INTO payments(id,public_id,merchant_id,merchant_reference,expected_chain,expected_asset_symbol,expected_asset_decimals,expected_amount_atomic,state,overpayment_policy,required_confirmations,expires_at,merchant_amount_atomic,platform_fee_atomic) VALUES($1,$2,$3,$4,'custom:flutterwave_ngn','NGN',2,$5::numeric,'WAITING','REQUIRE_REVIEW',0,$6,$7::numeric,$8::numeric)")
+        .bind(payment_id.0).bind(&public_id).bind(merchant.0).bind(&req.reference).bind(charge_total.to_string()).bind(expires).bind(amount.to_string()).bind(platform_fee.to_string())
+        .execute(&mut *tx).await.map_err(db)?;
+    sqlx::query("INSERT INTO checkout_addresses(payment_id,address_family,chain,address,derivation_version,recovery_capable) VALUES($1,'FIAT_VIRTUAL_ACCOUNT','custom:flutterwave_ngn',$2,'FLUTTERWAVE_DYNAMIC_V1',false)")
+        .bind(payment_id.0).bind(account_number).execute(&mut *tx).await.map_err(db)?;
+    sqlx::query("INSERT INTO fiat_payment_accounts(payment_id,provider,provider_reference,provider_account_id,account_number,bank_name,account_name,customer_email,expires_at,provider_payload) VALUES($1,'flutterwave',$2,$3,$4,$5,$6,$7,$8,$9)")
+        .bind(payment_id.0).bind(provider_reference).bind(data.get("flw_ref").and_then(Value::as_str)).bind(account_number).bind(bank_name)
+        .bind(&response.account_name).bind(email).bind(expires).bind(&provider_body).execute(&mut *tx).await.map_err(db)?;
+    sqlx::query("INSERT INTO payment_state_transitions(payment_id,from_state,to_state,reason_code,actor_type,metadata) VALUES($1,NULL,'WAITING','flutterwave_account_created','SYSTEM',$2)")
+        .bind(payment_id.0).bind(json!({"provider":"flutterwave","account_expires_at":response.account_expires_at})).execute(&mut *tx).await.map_err(db)?;
+    enqueue_domain_event_tx(&mut tx,"flowpay.payments","payment.created","PAYMENT",&public_id,
+        json!({"payment_id":public_id,"merchant_id":merchant.0,"status":"WAITING","chain":"custom:flutterwave_ngn","asset":"NGN","amount_atomic":amount.to_string(),"payment_method":"bank_transfer"}),None,None)
+        .await.map_err(internal)?;
+    tx.commit().await.map_err(db)?;
+    store_idempotent_response(
+        &state,
+        merchant,
+        "POST:/v1/payments",
+        &idem,
+        &request_hash,
+        &response,
+        "PAYMENT",
+        &response.id,
+    )
+    .await?;
+    enqueue_event(
+        &state,
+        merchant,
+        "payment.created",
+        "PAYMENT",
+        &response.id,
+        serde_json::to_value(&response).map_err(internal)?,
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(response)))
+}
+
+async fn flutterwave_webhook(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: String,
+) -> Result<StatusCode, ApiError> {
+    let secret_hash = state
+        .config
+        .flutterwave_secret_hash
+        .as_deref()
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::NOT_IMPLEMENTED,
+                "flutterwave_webhook_not_configured",
+                "Flutterwave webhook secret is not configured",
+            )
+        })?;
+    let signature_ok = if let Some(signature) = headers
+        .get("flutterwave-signature")
+        .and_then(|v| v.to_str().ok())
+    {
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret_hash.as_bytes()).map_err(internal)?;
+        mac.update(body.as_bytes());
+        let expected = B64.encode(mac.finalize().into_bytes());
+        expected.as_bytes().ct_eq(signature.as_bytes()).unwrap_u8() == 1
+    } else {
+        headers
+            .get("verif-hash")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.as_bytes().ct_eq(secret_hash.as_bytes()).unwrap_u8() == 1)
+    };
+    if !signature_ok {
+        return Err(ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "invalid_flutterwave_signature",
+            "invalid Flutterwave signature",
+        ));
+    }
+    let payload: Value = serde_json::from_str(&body).map_err(|_| {
+        ApiError::bad(
+            "invalid_flutterwave_payload",
+            "webhook payload must be JSON",
+        )
+    })?;
+    let data = payload.get("data").unwrap_or(&payload);
+    let transaction_id = value_as_string(data.get("id")).ok_or_else(|| {
+        ApiError::bad("invalid_flutterwave_payload", "transaction id is required")
+    })?;
+    let tx_ref = data
+        .get("tx_ref")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::bad("invalid_flutterwave_payload", "tx_ref is required"))?;
+    // Acknowledge straight away. Verification and the ledger posting are two
+    // outbound calls, so doing them inline made this endpoint the slowest part
+    // of a payment; the worker now does that work and the reconciliation sweep
+    // stays the safety net if the command is ever lost.
+    let mut tx = state.store.pool().begin().await.map_err(db)?;
+    enqueue_command_tx(
+        &mut tx,
+        "flowpay.commands",
+        "flutterwave.reconcile",
+        "PAYMENT",
+        tx_ref,
+        json!({"tx_ref": tx_ref, "transaction_id": transaction_id}),
+        None,
+        None,
+    )
+    .await
+    .map_err(internal)?;
+    tx.commit().await.map_err(db)?;
+    Ok(StatusCode::ACCEPTED)
+}
+
+/// Verifies a Flutterwave transaction against the FlowPay payment and, when the
+/// verified facts match, posts it to the ledger and marks the payment
+/// completed. Shared by the webhook handler and the reconciliation sweep so a
+/// missed webhook delivery cannot leave a paid invoice stuck in `WAITING`.
+pub(crate) async fn complete_flutterwave_payment(
+    state: &AppState,
+    tx_ref: &str,
+    transaction_id: &str,
+) -> Result<bool, ApiError> {
+    let row = sqlx::query("SELECT p.id,p.public_id,p.merchant_id,p.state,p.expected_amount_atomic::text AS amount_atomic,p.merchant_amount_atomic::text AS merchant_amount_atomic,p.platform_fee_atomic::text AS platform_fee_atomic,f.account_number FROM payments p JOIN fiat_payment_accounts f ON f.payment_id=p.id WHERE p.public_id=$1 AND f.provider='flutterwave'")
+        .bind(tx_ref).fetch_optional(state.store.pool()).await.map_err(db)?.ok_or_else(|| ApiError::not_found())?;
+    let current_state: String = row.try_get("state").map_err(internal)?;
+    if current_state == "COMPLETED" {
+        return Ok(false);
+    }
+    let secret = state
+        .config
+        .flutterwave_secret_key
+        .as_deref()
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "flutterwave_not_configured",
+                "Flutterwave is not configured",
+            )
+        })?;
+    let verify = state
+        .http
+        .get(format!(
+            "{}/transactions/{}/verify",
+            state.config.flutterwave_base_url, transaction_id
+        ))
+        .timeout(StdDuration::from_secs(20))
+        .bearer_auth(secret)
+        .send()
+        .await
+        .map_err(|e| {
+            ApiError::new(
+                StatusCode::BAD_GATEWAY,
+                "flutterwave_verification_failed",
+                e.to_string(),
+            )
+        })?;
+    let verified: Value = verify.json().await.map_err(|_| {
+        ApiError::new(
+            StatusCode::BAD_GATEWAY,
+            "invalid_flutterwave_response",
+            "Flutterwave verification returned invalid JSON",
+        )
+    })?;
+    let verified_data = verified.get("data").unwrap_or(&Value::Null);
+    let verified_ref = verified_data
+        .get("tx_ref")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let verified_status = verified_data
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let verified_currency = verified_data
+        .get("currency")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let verified_amount = value_as_string(verified_data.get("amount"))
+        .and_then(|v| AtomicAmount::from_decimal(&v, 2).ok())
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::BAD_GATEWAY,
+                "invalid_flutterwave_verification",
+                "Flutterwave returned an invalid amount",
+            )
+        })?;
+    let expected =
+        AtomicAmount::from_str(row.try_get::<&str, _>("amount_atomic").map_err(internal)?)
+            .map_err(internal)?;
+    if verified_ref != tx_ref
+        || !verified_status.eq_ignore_ascii_case("successful")
+        || !verified_currency.eq_ignore_ascii_case("NGN")
+        || verified_amount < expected
+    {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "flutterwave_payment_mismatch",
+            "verified Flutterwave payment does not match the FlowPay payment",
+        ));
+    }
+    let payment_id: Uuid = row.try_get("id").map_err(internal)?;
+    let merchant_id: Uuid = row.try_get("merchant_id").map_err(internal)?;
+    // Split what was collected. Payments created before fee pass-through (and
+    // any non-grossed-up row) attribute the whole amount to the merchant.
+    let merchant_amount = match row
+        .try_get::<Option<&str>, _>("merchant_amount_atomic")
+        .map_err(internal)?
+    {
+        Some(value) => AtomicAmount::from_str(value).map_err(internal)?,
+        None => expected.clone(),
+    };
+    let platform_fee = match row
+        .try_get::<Option<&str>, _>("platform_fee_atomic")
+        .map_err(internal)?
+    {
+        Some(value) => AtomicAmount::from_str(value).map_err(internal)?,
+        None => AtomicAmount::zero(),
+    };
+    let provider_fee = ngn_fee_component(
+        &verified_amount,
+        &AtomicAmount::from_biguint(merchant_amount.inner() + platform_fee.inner()),
+    );
+    // What Flutterwave actually kept, recorded for reconciliation reporting.
+    let provider_fee_actual = match (
+        value_as_string(verified_data.get("charged_amount")),
+        value_as_string(verified_data.get("amount_settled")),
+    ) {
+        (Some(charged), Some(settled)) => AtomicAmount::from_decimal(&charged, 2)
+            .ok()
+            .zip(AtomicAmount::from_decimal(&settled, 2).ok())
+            .map(|(charged, settled)| ngn_fee_component(&charged, &settled)),
+        _ => None,
+    };
+    let formance_reference = format!("flutterwave:{}", transaction_id);
+    post_formance_ngn(
+        state,
+        merchant_id,
+        &formance_reference,
+        &merchant_amount,
+        &platform_fee,
+        &provider_fee,
+        tx_ref,
+        transaction_id,
+    )
+    .await?;
+    let mut tx = state.store.pool().begin().await.map_err(db)?;
+    sqlx::query("INSERT INTO fiat_payment_receipts(provider,provider_transaction_id,payment_id,amount_atomic,currency,provider_reference,formance_reference,verified_payload,posted_at) VALUES('flutterwave',$1,$2,$3::numeric,'NGN',$4,$5,$6,now()) ON CONFLICT(provider,provider_transaction_id) DO NOTHING")
+        .bind(transaction_id).bind(payment_id).bind(verified_amount.to_string()).bind(tx_ref).bind(&formance_reference).bind(&verified).execute(&mut *tx).await.map_err(db)?;
+    sqlx::query("UPDATE payments SET provider_fee_atomic=$2::numeric WHERE id=$1")
+        .bind(payment_id)
+        .bind(provider_fee_actual.as_ref().map(ToString::to_string))
+        .execute(&mut *tx)
+        .await
+        .map_err(db)?;
+    let changed = sqlx::query("UPDATE payments SET state='COMPLETED',version=version+1,completed_at=now(),updated_at=now() WHERE id=$1 AND state NOT IN ('COMPLETED','CANCELLED','EXPIRED')")
+        .bind(payment_id).execute(&mut *tx).await.map_err(db)?.rows_affected();
+    if changed == 1 {
+        sqlx::query("INSERT INTO payment_state_transitions(payment_id,from_state,to_state,reason_code,actor_type,chain,tx_hash,metadata) VALUES($1,$2,'COMPLETED','flutterwave_verified_and_ledgered','SYSTEM','custom:flutterwave_ngn',$3,$4)")
+            .bind(payment_id).bind(&current_state).bind(transaction_id).bind(json!({"provider":"flutterwave","formance_reference":formance_reference})).execute(&mut *tx).await.map_err(db)?;
+        enqueue_domain_event_tx(&mut tx,"flowpay.payments","payment.completed","PAYMENT",tx_ref,
+            json!({"payment_id":tx_ref,"merchant_id":merchant_id,"status":"COMPLETED","chain":"custom:flutterwave_ngn","asset":"NGN","amount_atomic":verified_amount.to_string(),"provider_transaction_id":transaction_id}),None,None)
+            .await.map_err(internal)?;
+    }
+    tx.commit().await.map_err(db)?;
+    if changed == 1 {
+        enqueue_event(state,MerchantId(merchant_id),"payment.completed","PAYMENT",tx_ref,json!({"id":tx_ref,"status":"COMPLETED","asset":"NGN","amount_atomic":verified_amount.to_string(),"provider":"flutterwave"})).await?;
+    }
+    Ok(changed == 1)
+}
+
+/// Looks up the Flutterwave transaction id for a FlowPay payment reference.
+/// Returns `None` while Flutterwave has no successful transaction for the
+/// reference yet, so the sweep only spends a verification call on paid invoices.
+pub(crate) async fn find_flutterwave_transaction(
+    state: &AppState,
+    tx_ref: &str,
+) -> Result<Option<String>, ApiError> {
+    let Some(secret) = state.config.flutterwave_secret_key.as_deref() else {
+        return Ok(None);
+    };
+    let response = state
+        .http
+        .get(format!("{}/transactions", state.config.flutterwave_base_url))
+        .query(&[("tx_ref", tx_ref)])
+        .timeout(StdDuration::from_secs(20))
+        .bearer_auth(secret)
+        .send()
+        .await
+        .map_err(|e| {
+            ApiError::new(
+                StatusCode::BAD_GATEWAY,
+                "flutterwave_lookup_failed",
+                e.to_string(),
+            )
+        })?;
+    let body: Value = response.json().await.map_err(|_| {
+        ApiError::new(
+            StatusCode::BAD_GATEWAY,
+            "invalid_flutterwave_response",
+            "Flutterwave transaction lookup returned invalid JSON",
+        )
+    })?;
+    let Some(transaction) = body
+        .get("data")
+        .and_then(Value::as_array)
+        .and_then(|rows| rows.first())
+    else {
+        return Ok(None);
+    };
+    let successful = transaction
+        .get("status")
+        .and_then(Value::as_str)
+        .is_some_and(|v| v.eq_ignore_ascii_case("successful"));
+    if !successful {
+        return Ok(None);
+    }
+    Ok(value_as_string(transaction.get("id")))
+}
+
+/// Posts a collected NGN payment to the ledger, attributing every naira: the
+/// merchant's requested amount, the platform's fee, and the provider's cut.
+/// The three always sum to the total the customer paid, so the ledger balances
+/// against the money that actually arrived.
+async fn post_formance_ngn(
+    state: &AppState,
+    merchant_id: Uuid,
+    reference: &str,
+    merchant_amount: &AtomicAmount,
+    platform_fee: &AtomicAmount,
+    provider_fee: &AtomicAmount,
+    payment_id: &str,
+    provider_id: &str,
+) -> Result<(), ApiError> {
+    let url = format!(
+        "{}/api/ledger/v2/{}/transactions",
+        state.config.formance_base_url, state.config.formance_ledger
+    );
+    let mut postings: Vec<Value> = Vec::new();
+    for (destination, amount) in [
+        (
+            format!("merchants:{merchant_id}:receivable"),
+            merchant_amount,
+        ),
+        ("platform:revenue".to_owned(), platform_fee),
+        ("platform:payment-fees".to_owned(), provider_fee),
+    ] {
+        if amount.is_zero() {
+            continue;
+        }
+        postings.push(json!({
+            "source":"world",
+            "destination":destination,
+            "amount":amount.to_string().parse::<u64>().map_err(|_| {
+                ApiError::bad(
+                    "amount_out_of_range",
+                    "NGN amount exceeds the Formance posting limit",
+                )
+            })?,
+            "asset":"NGN/2"
+        }));
+    }
+    if postings.is_empty() {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "empty_ledger_posting",
+            "collected payment has nothing to post to the ledger",
+        ));
+    }
+    let mut request = state.http.post(url).timeout(StdDuration::from_secs(20)).header("Idempotency-Key",reference).json(&json!({
+        "postings":postings,
+        "reference":reference,
+        "metadata":{"payment_id":payment_id,"provider":"flutterwave","provider_transaction_id":provider_id}
+    }));
+    if let Some(token) = state.config.formance_token.as_deref() {
+        request = request.bearer_auth(token);
+    }
+    let response = request.send().await.map_err(|e| {
+        ApiError::new(
+            StatusCode::BAD_GATEWAY,
+            "formance_unavailable",
+            e.to_string(),
+        )
+    })?;
+    if !response.status().is_success() {
+        return Err(ApiError::new(
+            StatusCode::BAD_GATEWAY,
+            "formance_posting_failed",
+            format!(
+                "Formance rejected the ledger posting with status {}",
+                response.status()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn value_as_string(value: Option<&Value>) -> Option<String> {
+    match value? {
+        Value::String(v) => Some(v.clone()),
+        Value::Number(v) => Some(v.to_string()),
+        _ => None,
+    }
+}
+
+/// Grosses up a merchant's requested NGN amount so the merchant still nets it
+/// after the flat platform fee and Flutterwave's percentage fee (plus VAT on
+/// that fee) are taken out of what the customer is charged.
+///
+/// Solving `total - total*fee*(1+vat) = merchant + platform` gives
+/// `total = (merchant + platform) / (1 - fee*(1+vat))`, computed here in exact
+/// integer arithmetic and rounded up so the merchant is never left short.
+pub(crate) fn ngn_charge_total(
+    merchant_atomic: &AtomicAmount,
+    platform_fee_atomic: &AtomicAmount,
+    fee_bps: u64,
+    vat_bps: u64,
+) -> AtomicAmount {
+    // 1.0 expressed at 4 decimal places of both the fee and the VAT on it.
+    let scale = BigUint::from(100_000_000u64);
+    let deduction = BigUint::from(fee_bps) * BigUint::from(10_000u64 + vat_bps);
+    let net = merchant_atomic.inner() + platform_fee_atomic.inner();
+    if deduction >= scale {
+        return AtomicAmount::from_biguint(net);
+    }
+    let denominator = scale.clone() - deduction;
+    let numerator = net * scale;
+    let total = (numerator + &denominator - BigUint::from(1u64)) / denominator;
+    AtomicAmount::from_biguint(total)
+}
+
+/// The part of a total that is not owed to the merchant or the platform, i.e.
+/// the fee the payment provider keeps.
+fn ngn_fee_component(total: &AtomicAmount, net: &AtomicAmount) -> AtomicAmount {
+    if total.inner() >= net.inner() {
+        AtomicAmount::from_biguint(total.inner() - net.inner())
+    } else {
+        AtomicAmount::zero()
+    }
 }
 
 async fn register_checkout_with_alchemy(
@@ -480,16 +1116,45 @@ async fn get_payment(
         .get_payment(merchant, &id)
         .await
         .map_err(map_store)?;
+    Ok(Json(payment_detail(&state, p).await?))
+}
+
+/// The customer-facing payment view. A payer has no merchant credential, and
+/// the payload below deliberately excludes every merchant-private field
+/// (settlement address, provider references, internal ids).
+async fn public_payment(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let p = state
+        .store
+        .get_payment_by_public_id(&id)
+        .await
+        .map_err(map_store)?;
+    Ok(Json(payment_detail(&state, p).await?))
+}
+
+async fn public_payment_deposits(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let p = state
+        .store
+        .get_payment_by_public_id(&id)
+        .await
+        .map_err(map_store)?;
+    let deposits = state.store.payment_deposits(p.id).await.map_err(db)?;
+    Ok(Json(json!({"data":deposits})))
+}
+
+/// Builds the crypto checkout and dashboard representation for one payment.
+async fn payment_detail(state: &AppState, p: Payment) -> Result<Value, ApiError> {
     let name: String = sqlx::query_scalar("SELECT name FROM merchants WHERE id=$1")
-        .bind(merchant.0)
+        .bind(p.merchant_id.0)
         .fetch_one(state.store.pool())
         .await
         .map_err(db)?;
-    Ok(Json(payment_json(
-        &p,
-        &state.config.checkout_base_url,
-        &name,
-    )))
+    Ok(payment_json(&p, &state.config.checkout_base_url, &name))
 }
 async fn cancel_payment(
     State(state): State<AppState>,
@@ -1042,6 +1707,61 @@ async fn retry_claim(
     Ok(Json(json!({"id":id,"status":"INVESTIGATING"})))
 }
 
+async fn start_claim_investigation(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let merchant = authenticate(&state, &headers).await?;
+    let claim = state
+        .store
+        .get_claim(merchant, &id)
+        .await
+        .map_err(map_store)?;
+    if !matches!(
+        claim.state,
+        ClaimState::AwaitingEvidence
+            | ClaimState::AwaitingAuthorization
+            | ClaimState::NeedsMoreEvidence
+            | ClaimState::Escalated
+    ) {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "claim_not_investigatable",
+            "claim is already being investigated or has a final disposition",
+        ));
+    }
+    let payment = state
+        .store
+        .get_payment_by_id(claim.payment_id)
+        .await
+        .map_err(map_store)?;
+    if payment.state.can_transition_to(PaymentState::ClaimPending) {
+        state
+            .store
+            .set_payment_state(
+                payment.id,
+                PaymentState::ClaimPending,
+                "internal_investigation_requested",
+                claim.claimed_chain.as_ref(),
+                claim.transaction_hash.as_deref(),
+            )
+            .await
+            .map_err(db)?;
+    }
+    state
+        .store
+        .set_claim_state(
+            claim.id,
+            ClaimState::Investigating,
+            "internal_investigation_requested",
+            "SYSTEM",
+        )
+        .await
+        .map_err(db)?;
+    Ok(Json(json!({"id":id,"status":"INVESTIGATING"})))
+}
+
 async fn fund_claim(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1258,6 +1978,39 @@ async fn test_webhook(
 }
 
 async fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<MerchantId, ApiError> {
+    // A dashboard session takes precedence over an API key: the browser holds
+    // this instead, and it already resolves to exactly one merchant.
+    if let Some(token) = bearer_token(headers) {
+        let token_hash = crate::auth::hash_secret(token);
+        let merchant: Option<Uuid> = sqlx::query_scalar(
+            "UPDATE merchant_sessions SET last_seen_at=now() WHERE token_hash=$1 AND expires_at>now() RETURNING merchant_id",
+        )
+        .bind(&token_hash)
+        .fetch_optional(state.store.pool())
+        .await
+        .map_err(db)?;
+        let merchant = merchant.ok_or_else(|| {
+            ApiError::new(
+                StatusCode::UNAUTHORIZED,
+                "invalid_session",
+                "session is invalid or has expired",
+            )
+        })?;
+        let active: Option<bool> =
+            sqlx::query_scalar("SELECT status='ACTIVE' FROM merchants WHERE id=$1")
+                .bind(merchant)
+                .fetch_optional(state.store.pool())
+                .await
+                .map_err(db)?;
+        if active != Some(true) {
+            return Err(ApiError::new(
+                StatusCode::UNAUTHORIZED,
+                "merchant_disabled",
+                "merchant account is disabled",
+            ));
+        }
+        return Ok(MerchantId(merchant));
+    }
     let key = match headers
         .get("x-flowpay-api-key")
         .and_then(|v| v.to_str().ok())
@@ -1514,6 +2267,675 @@ fn internal<E: std::fmt::Display>(e: E) -> ApiError {
     )
 }
 
+/// Platform-side revenue reporting. This is the only place that reads the
+/// platform's own ledger accounts, and it is gated by a separate admin
+/// credential so merchant API keys can never see platform revenue.
+// ---------------------------------------------------------------------------
+// Merchant identity: signup, email verification, login, sessions, onboarding
+// ---------------------------------------------------------------------------
+
+fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+/// Normalizes an address for storage and comparison. Emails are matched
+/// case-insensitively, which is what every mail provider effectively does.
+fn normalize_email(raw: &str) -> Result<String, ApiError> {
+    let email = raw.trim().to_ascii_lowercase();
+    let valid = email.len() <= 254
+        && email
+            .split_once('@')
+            .is_some_and(|(local, domain)| !local.is_empty() && domain.contains('.'));
+    if !valid {
+        return Err(ApiError::bad(
+            "invalid_email",
+            "enter a valid email address",
+        ));
+    }
+    Ok(email)
+}
+
+fn validate_password(password: &str) -> Result<(), ApiError> {
+    if password.len() < 8 {
+        return Err(ApiError::bad(
+            "weak_password",
+            "password must be at least 8 characters",
+        ));
+    }
+    if password.len() > 200 {
+        return Err(ApiError::bad(
+            "invalid_password",
+            "password must be at most 200 characters",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_business_name(name: &str) -> Result<String, ApiError> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() || trimmed.chars().count() > 120 {
+        return Err(ApiError::bad(
+            "invalid_business_name",
+            "business name must be 1-120 characters",
+        ));
+    }
+    Ok(trimmed.to_owned())
+}
+
+/// Mints a fresh session row and returns the bearer token. Only the hash is
+/// persisted, so the raw token exists solely in the response.
+async fn create_session(
+    state: &AppState,
+    merchant: Uuid,
+    user_agent: Option<String>,
+) -> Result<(String, OffsetDateTime), ApiError> {
+    let token = crate::auth::new_session_token();
+    let token_hash = crate::auth::hash_secret(&token);
+    let expires_at =
+        OffsetDateTime::now_utc() + Duration::hours(state.config.auth_session_ttl_hours.max(1));
+    sqlx::query(
+        "INSERT INTO merchant_sessions(id,merchant_id,token_hash,user_agent,expires_at) VALUES($1,$2,$3,$4,$5)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(merchant)
+    .bind(&token_hash)
+    .bind(user_agent.as_deref())
+    .bind(expires_at)
+    .execute(state.store.pool())
+    .await
+    .map_err(db)?;
+    Ok((token, expires_at))
+}
+
+/// Issues a six digit code, storing only its hash.
+async fn issue_verification_code(
+    state: &AppState,
+    email: &str,
+    purpose: &str,
+) -> Result<String, ApiError> {
+    let code = crate::auth::new_verification_code();
+    let code_hash = crate::auth::hash_secret(&code);
+    let expires_at = OffsetDateTime::now_utc()
+        + Duration::minutes(state.config.auth_code_ttl_minutes.max(1));
+    sqlx::query(
+        "INSERT INTO email_verification_codes(id,email,purpose,code_hash,expires_at) VALUES($1,$2,$3,$4,$5)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(email)
+    .bind(purpose)
+    .bind(&code_hash)
+    .bind(expires_at)
+    .execute(state.store.pool())
+    .await
+    .map_err(db)?;
+    Ok(code)
+}
+
+/// Delivers a verification code, translating a missing SMTP setup into an
+/// actionable error rather than a silent failure.
+async fn send_verification_email(
+    state: &AppState,
+    email: &str,
+    code: &str,
+    purpose: &str,
+) -> Result<(), ApiError> {
+    let mailer = crate::auth::Mailer::from_config(&state.config).ok_or_else(|| {
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "mail_not_configured",
+            "email delivery is not configured",
+        )
+    })?;
+    let (heading, intro) = match purpose {
+        "LOGIN" => (
+            "Confirm it is you",
+            "Enter this code to finish signing in to your FlowPay dashboard.",
+        ),
+        _ => (
+            "Verify your email",
+            "Enter this code to activate your FlowPay merchant account.",
+        ),
+    };
+    let html = crate::auth::code_email_html(
+        heading,
+        intro,
+        code,
+        state.config.auth_code_ttl_minutes.max(1),
+    );
+    mailer
+        .send(email, "Your FlowPay verification code", html)
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, %email, "verification email delivery failed");
+            ApiError::new(
+                StatusCode::BAD_GATEWAY,
+                "email_delivery_failed",
+                "we could not send the verification email, please try again",
+            )
+        })
+}
+
+fn merchant_json(row: &sqlx::postgres::PgRow) -> Value {
+    json!({
+        "id": row.try_get::<Uuid,_>("id").map(|v| v.to_string()).unwrap_or_default(),
+        "email": row.try_get::<Option<String>,_>("email").ok().flatten(),
+        "business_name": row.try_get::<String,_>("name").unwrap_or_default(),
+        "contact_name": row.try_get::<Option<String>,_>("contact_name").ok().flatten(),
+        "public_id": row.try_get::<String,_>("public_id").unwrap_or_default(),
+        "status": row.try_get::<String,_>("status").unwrap_or_default(),
+        "email_verified": row.try_get::<Option<OffsetDateTime>,_>("email_verified_at").ok().flatten().is_some(),
+        "onboarding_completed": row.try_get::<Option<OffsetDateTime>,_>("onboarding_completed_at").ok().flatten().is_some(),
+        "settlement_address": row.try_get::<Option<String>,_>("evm_settlement_address").ok().flatten(),
+        "created_at": row.try_get::<OffsetDateTime,_>("created_at").map(|v| v.unix_timestamp() * 1000).unwrap_or_default(),
+    })
+}
+
+const MERCHANT_COLUMNS: &str = "id,email,name,contact_name,public_id,status,email_verified_at,onboarding_completed_at,evm_settlement_address,created_at";
+
+async fn load_merchant(state: &AppState, merchant: Uuid) -> Result<Value, ApiError> {
+    let row = sqlx::query(&format!(
+        "SELECT {MERCHANT_COLUMNS} FROM merchants WHERE id=$1"
+    ))
+    .bind(merchant)
+    .fetch_optional(state.store.pool())
+    .await
+    .map_err(db)?
+    .ok_or_else(ApiError::not_found)?;
+    Ok(merchant_json(&row))
+}
+
+#[derive(Debug, Deserialize)]
+struct SignupRequest {
+    email: String,
+    password: String,
+    business_name: String,
+    contact_name: Option<String>,
+}
+
+async fn signup(
+    State(state): State<AppState>,
+    Json(req): Json<SignupRequest>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    // Validate the request first so a caller sees the real problem rather than
+    // a server misconfiguration.
+    let email = normalize_email(&req.email)?;
+    validate_password(&req.password)?;
+    let business_name = validate_business_name(&req.business_name)?;
+    // Then fail before creating anything if we cannot deliver the code, so we
+    // never leave an account that can never be verified.
+    if crate::auth::Mailer::from_config(&state.config).is_none() {
+        return Err(ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "mail_not_configured",
+            "email delivery is not configured",
+        ));
+    }
+    let existing: Option<Uuid> =
+        sqlx::query_scalar("SELECT id FROM merchants WHERE lower(email)=$1")
+            .bind(&email)
+            .fetch_optional(state.store.pool())
+            .await
+            .map_err(db)?;
+    if existing.is_some() {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "email_already_registered",
+            "an account already exists for this email",
+        ));
+    }
+    let password_hash = crate::auth::hash_password(&req.password).map_err(|error| {
+        tracing::error!(%error, "password hashing failed");
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "password_hash_failed",
+            "could not secure the password",
+        )
+    })?;
+    let merchant_id = Uuid::now_v7();
+    let public_id = format!("mer_{}", &merchant_id.simple().to_string()[..20]);
+    let contact_name = req
+        .contact_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.chars().take(120).collect::<String>());
+    sqlx::query(
+        "INSERT INTO merchants(id,public_id,name,status,email,password_hash,contact_name) VALUES($1,$2,$3,'ACTIVE',$4,$5,$6)",
+    )
+    .bind(merchant_id)
+    .bind(&public_id)
+    .bind(&business_name)
+    .bind(&email)
+    .bind(&password_hash)
+    .bind(contact_name.as_deref())
+    .execute(state.store.pool())
+    .await
+    .map_err(db)?;
+    let code = issue_verification_code(&state, &email, "SIGNUP").await?;
+    if let Err(error) = send_verification_email(&state, &email, &code, "SIGNUP").await {
+        // The account exists, so tell the client to offer a resend instead of
+        // making them sign up again.
+        tracing::warn!(%email, "signup created but the code could not be sent");
+        return Ok((
+            StatusCode::ACCEPTED,
+            Json(json!({
+                "email": email,
+                "verification_required": true,
+                "email_sent": false,
+                "message": error.message,
+            })),
+        ));
+    }
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "email": email,
+            "verification_required": true,
+            "email_sent": true,
+            "expires_in_minutes": state.config.auth_code_ttl_minutes,
+        })),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+struct VerifyEmailRequest {
+    email: String,
+    code: String,
+}
+
+async fn verify_email(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<VerifyEmailRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let email = normalize_email(&req.email)?;
+    let submitted = req.code.trim();
+    if submitted.len() != 6 || !submitted.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(ApiError::bad(
+            "invalid_code",
+            "enter the 6 digit code from your email",
+        ));
+    }
+    let row = sqlx::query(
+        "SELECT id,code_hash,attempts FROM email_verification_codes WHERE lower(email)=$1 AND consumed_at IS NULL AND expires_at>now() ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(&email)
+    .fetch_optional(state.store.pool())
+    .await
+    .map_err(db)?
+    .ok_or_else(|| {
+        ApiError::bad(
+            "code_expired",
+            "that code has expired, request a new one",
+        )
+    })?;
+    let code_id: Uuid = row.try_get("id").map_err(internal)?;
+    let attempts: i32 = row.try_get("attempts").map_err(internal)?;
+    if attempts >= 5 {
+        return Err(ApiError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too_many_attempts",
+            "too many incorrect attempts, request a new code",
+        ));
+    }
+    let stored_hash: String = row.try_get("code_hash").map_err(internal)?;
+    if !crate::auth::code_matches(submitted, &stored_hash) {
+        sqlx::query("UPDATE email_verification_codes SET attempts=attempts+1 WHERE id=$1")
+            .bind(code_id)
+            .execute(state.store.pool())
+            .await
+            .map_err(db)?;
+        return Err(ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "invalid_code",
+            "that code is not correct",
+        ));
+    }
+    let mut tx = state.store.pool().begin().await.map_err(db)?;
+    sqlx::query("UPDATE email_verification_codes SET consumed_at=now() WHERE id=$1")
+        .bind(code_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(db)?;
+    let merchant: Uuid = sqlx::query_scalar(
+        "UPDATE merchants SET email_verified_at=coalesce(email_verified_at,now()),updated_at=now() WHERE lower(email)=$1 RETURNING id",
+    )
+    .bind(&email)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(db)?
+    .ok_or_else(|| {
+        ApiError::bad(
+            "account_not_found",
+            "no account matches this email, sign up first",
+        )
+    })?;
+    tx.commit().await.map_err(db)?;
+    let user_agent = headers
+        .get("user-agent")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.chars().take(400).collect::<String>());
+    let (token, expires_at) = create_session(&state, merchant, user_agent).await?;
+    Ok(Json(json!({
+        "session_token": token,
+        "expires_at": expires_at.unix_timestamp() * 1000,
+        "merchant": load_merchant(&state, merchant).await?,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct ResendCodeRequest {
+    email: String,
+    purpose: Option<String>,
+}
+
+async fn resend_code(
+    State(state): State<AppState>,
+    Json(req): Json<ResendCodeRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let email = normalize_email(&req.email)?;
+    let purpose = match req.purpose.as_deref() {
+        Some("LOGIN") => "LOGIN",
+        _ => "SIGNUP",
+    };
+    let exists: Option<Uuid> = sqlx::query_scalar("SELECT id FROM merchants WHERE lower(email)=$1")
+        .bind(&email)
+        .fetch_optional(state.store.pool())
+        .await
+        .map_err(db)?;
+    if exists.is_none() {
+        // Do not reveal whether the address is registered.
+        return Ok(Json(json!({"sent": true})));
+    }
+    let last: Option<OffsetDateTime> = sqlx::query_scalar(
+        "SELECT created_at FROM email_verification_codes WHERE lower(email)=$1 ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(&email)
+    .fetch_optional(state.store.pool())
+    .await
+    .map_err(db)?;
+    if last.is_some_and(|created| created > OffsetDateTime::now_utc() - Duration::seconds(45)) {
+        return Err(ApiError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "resend_too_soon",
+            "a code was just sent, please wait a moment",
+        ));
+    }
+    let code = issue_verification_code(&state, &email, purpose).await?;
+    if let Err(error) = send_verification_email(&state, &email, &code, purpose).await {
+        tracing::error!(%email, "resend failed to deliver");
+        return Err(error);
+    }
+    Ok(Json(json!({
+        "sent": true,
+        "expires_in_minutes": state.config.auth_code_ttl_minutes,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct LoginRequest {
+    email: String,
+    password: String,
+}
+
+async fn login(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<LoginRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let email = normalize_email(&req.email)?;
+    let row = sqlx::query(
+        "SELECT id,password_hash,email_verified_at,status FROM merchants WHERE lower(email)=$1",
+    )
+    .bind(&email)
+    .fetch_optional(state.store.pool())
+    .await
+    .map_err(db)?;
+    let Some(row) = row else {
+        return Err(ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "invalid_credentials",
+            "email or password is incorrect",
+        ));
+    };
+    let stored: Option<String> = row.try_get("password_hash").map_err(internal)?;
+    let matches = stored
+        .as_deref()
+        .is_some_and(|hash| crate::auth::verify_password(&req.password, hash));
+    if !matches {
+        return Err(ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "invalid_credentials",
+            "email or password is incorrect",
+        ));
+    }
+    let status: String = row.try_get("status").map_err(internal)?;
+    if status != "ACTIVE" {
+        return Err(ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "merchant_disabled",
+            "merchant account is disabled",
+        ));
+    }
+    let verified: Option<OffsetDateTime> = row.try_get("email_verified_at").map_err(internal)?;
+    let merchant: Uuid = row.try_get("id").map_err(internal)?;
+    if verified.is_none() {
+        // The password was right, so completing verification is the next step.
+        let code = issue_verification_code(&state, &email, "LOGIN").await?;
+        let delivered = send_verification_email(&state, &email, &code, "LOGIN").await.is_ok();
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "email_not_verified",
+            if delivered {
+                "verify your email to continue, we just sent a new code"
+            } else {
+                "verify your email to continue"
+            },
+        ));
+    }
+    let user_agent = headers
+        .get("user-agent")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.chars().take(400).collect::<String>());
+    let (token, expires_at) = create_session(&state, merchant, user_agent).await?;
+    Ok(Json(json!({
+        "session_token": token,
+        "expires_at": expires_at.unix_timestamp() * 1000,
+        "merchant": load_merchant(&state, merchant).await?,
+    })))
+}
+
+async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<Value>, ApiError> {
+    let Some(token) = bearer_token(&headers) else {
+        return Ok(Json(json!({"signed_out": true})));
+    };
+    let token_hash = crate::auth::hash_secret(token);
+    sqlx::query("DELETE FROM merchant_sessions WHERE token_hash=$1")
+        .bind(&token_hash)
+        .execute(state.store.pool())
+        .await
+        .map_err(db)?;
+    Ok(Json(json!({"signed_out": true})))
+}
+
+async fn current_session(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let merchant = authenticate(&state, &headers).await?;
+    Ok(Json(json!({ "merchant": load_merchant(&state, merchant.0).await? })))
+}
+
+#[derive(Debug, Deserialize)]
+struct OnboardingRequest {
+    business_name: String,
+    /// Only required by the on-chain rails. Bank-transfer merchants never touch
+    /// an EVM wallet, so signup must not block on one.
+    #[serde(default)]
+    evm_settlement_address: Option<String>,
+    contact_name: Option<String>,
+}
+
+async fn complete_onboarding(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<OnboardingRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let merchant = authenticate(&state, &headers).await?;
+    let business_name = validate_business_name(&req.business_name)?;
+    let address = req
+        .evm_settlement_address
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if let Some(address) = address {
+        let valid_address = address.len() == 42
+            && address.starts_with("0x")
+            && address[2..].bytes().all(|byte| byte.is_ascii_hexdigit());
+        if !valid_address {
+            return Err(ApiError::bad(
+                "invalid_settlement_address",
+                "settlement address must be a 0x-prefixed EVM address",
+            ));
+        }
+    }
+    let contact_name = req
+        .contact_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.chars().take(120).collect::<String>());
+    sqlx::query(
+        "UPDATE merchants SET name=$2,contact_name=coalesce($3,contact_name),evm_settlement_address=coalesce($4,evm_settlement_address),onboarding_completed_at=coalesce(onboarding_completed_at,now()),updated_at=now() WHERE id=$1",
+    )
+    .bind(merchant.0)
+    .bind(&business_name)
+    .bind(contact_name.as_deref())
+    .bind(address)
+    .execute(state.store.pool())
+    .await
+    .map_err(db)?;
+    // Mint a first API key so the merchant can drive the API from their own
+    // backend. Returned once, exactly like the dashboard's key creation flow.
+    let environment = if state.config.environment == "local" {
+        "test"
+    } else {
+        "live"
+    };
+    let prefix = format!(
+        "fp_{}_{}",
+        environment,
+        &Uuid::now_v7().simple().to_string()[..10]
+    );
+    let secret = format!("{}{}", Uuid::now_v7().simple(), Uuid::now_v7().simple());
+    let full = format!("{prefix}.{secret}");
+    let hash = hex::encode(Sha256::digest(
+        [state.config.api_key_pepper.as_bytes(), full.as_bytes()].concat(),
+    ));
+    let existing: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM api_keys WHERE merchant_id=$1 AND revoked_at IS NULL")
+            .bind(merchant.0)
+            .fetch_one(state.store.pool())
+            .await
+            .map_err(db)?;
+    let api_key = if existing > 0 {
+        None
+    } else {
+        sqlx::query(
+            "INSERT INTO api_keys(merchant_id,label,public_prefix,secret_hash) VALUES($1,$2,$3,$4)",
+        )
+        .bind(merchant.0)
+        .bind("Default key")
+        .bind(&prefix)
+        .bind(&hash)
+        .execute(state.store.pool())
+        .await
+        .map_err(db)?;
+        Some(full)
+    };
+    Ok(Json(json!({
+        "merchant": load_merchant(&state, merchant.0).await?,
+        "api_key": api_key,
+    })))
+}
+
+async fn admin_revenue(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let expected = state.config.admin_key.as_deref().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::NOT_IMPLEMENTED,
+            "admin_not_configured",
+            "admin access is not configured",
+        )
+    })?;
+    let supplied = headers
+        .get("x-flowpay-admin-key")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    if supplied.as_bytes().ct_eq(expected.as_bytes()).unwrap_u8() != 1 {
+        return Err(ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "invalid_admin_key",
+            "invalid admin key",
+        ));
+    }
+
+    // Platform ledger balances, read from the ledger of record.
+    let mut accounts = Vec::new();
+    for address in ["platform:revenue", "platform:payment-fees"] {
+        let encoded = address.replace(':', "%3A");
+        let url = format!(
+            "{}/api/ledger/v2/{}/accounts/{}?expand=volumes",
+            state.config.formance_base_url, state.config.formance_ledger, encoded
+        );
+        let mut request = state
+            .http
+            .get(url)
+            .timeout(StdDuration::from_secs(10));
+        if let Some(token) = state.config.formance_token.as_deref() {
+            request = request.bearer_auth(token);
+        }
+        let balance = match request.send().await {
+            Ok(response) if response.status().is_success() => {
+                match response.json::<Value>().await {
+                    Ok(body) => body
+                        .pointer("/data/volumes/NGN~12/balance")
+                        .map(|value| value.to_string()),
+                    Err(_) => None,
+                }
+            }
+            _ => None,
+        };
+        accounts.push(json!({"account": address, "balance_atomic": balance}));
+    }
+
+    let totals = sqlx::query("SELECT count(*) FILTER (WHERE state='COMPLETED')::bigint AS completed,coalesce(sum(expected_amount_atomic) FILTER (WHERE state='COMPLETED'),0)::text AS collected,coalesce(sum(merchant_amount_atomic) FILTER (WHERE state='COMPLETED'),0)::text AS merchant_credited,coalesce(sum(platform_fee_atomic) FILTER (WHERE state='COMPLETED'),0)::text AS platform_fees,coalesce(sum(provider_fee_atomic) FILTER (WHERE state='COMPLETED'),0)::text AS provider_fees FROM payments WHERE expected_chain='custom:flutterwave_ngn'")
+        .fetch_one(state.store.pool())
+        .await
+        .map_err(db)?;
+    Ok(Json(json!({
+        "environment": state.config.environment,
+        "platform_fee_atomic": state.config.ngn_platform_fee_atomic.to_string(),
+        "provider_fee_bps": state.config.flutterwave_fee_bps.to_string(),
+        "provider_fee_vat_bps": state.config.flutterwave_fee_vat_bps.to_string(),
+        "ledger": accounts,
+        "ngn": {
+            "completed_payments": totals.try_get::<i64,_>("completed").unwrap_or_default(),
+            "collected_atomic": totals.try_get::<String,_>("collected").unwrap_or_default(),
+            "merchant_credited_atomic": totals.try_get::<String,_>("merchant_credited").unwrap_or_default(),
+            "platform_fee_atomic": totals.try_get::<String,_>("platform_fees").unwrap_or_default(),
+            "provider_fee_atomic": totals.try_get::<String,_>("provider_fees").unwrap_or_default(),
+        }
+    })))
+}
+
 async fn get_overview(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1534,7 +2956,11 @@ async fn get_overview(
     })?;
     let rows=sqlx::query("SELECT DISTINCT chain,symbol,token_contract,decimals FROM chain_assets WHERE enabled=true AND purpose IN ('PAYMENT','RECOVERY','BOTH') AND token_contract IS NOT NULL ORDER BY chain,symbol")
         .fetch_all(state.store.pool()).await.map_err(db)?;
-    let mut balances = Vec::new();
+    // Each balance is an independent RPC call. Running them together keeps the
+    // dashboard's critical path at roughly one round trip instead of one per
+    // enabled chain and token, which is what made this endpoint the slowest
+    // part of every dashboard render.
+    let mut pending = Vec::new();
     for row in rows {
         let chain_name: String = row.try_get("chain").map_err(internal)?;
         let Ok(chain) = ChainKey::from_str(&chain_name) else {
@@ -1546,11 +2972,16 @@ async fn get_overview(
         let token: String = row.try_get("token_contract").map_err(internal)?;
         let symbol: String = row.try_get("symbol").map_err(internal)?;
         let decimals: i16 = row.try_get("decimals").map_err(internal)?;
-        match runtime.adapter.token_balance(&token,&settlement).await {
-            Ok(amount)=>balances.push(json!({"chain":chain,"symbol":symbol,"contract":token,"decimals":decimals,"amount_atomic":amount.to_string(),"amount":amount.to_decimal(decimals as u8)})),
-            Err(error)=>balances.push(json!({"chain":chain,"symbol":symbol,"contract":token,"decimals":decimals,"error":error.to_string()})),
-        }
+        let adapter = runtime.adapter.clone();
+        let settlement = settlement.clone();
+        pending.push(async move {
+            match adapter.token_balance(&token,&settlement).await {
+                Ok(amount)=>json!({"chain":chain,"symbol":symbol,"contract":token,"decimals":decimals,"amount_atomic":amount.to_string(),"amount":amount.to_decimal(decimals as u8)}),
+                Err(error)=>json!({"chain":chain,"symbol":symbol,"contract":token,"decimals":decimals,"error":error.to_string()}),
+            }
+        });
     }
+    let balances = futures_util::future::join_all(pending).await;
     let payment_counts=sqlx::query("SELECT count(*)::bigint AS total,count(*) FILTER(WHERE state='COMPLETED')::bigint AS completed FROM payments WHERE merchant_id=$1")
         .bind(merchant.0).fetch_one(state.store.pool()).await.map_err(db)?;
     let claim_counts=sqlx::query("SELECT count(*) FILTER(WHERE state NOT IN ('RECOVERED','REJECTED','NOT_RECOVERABLE'))::bigint AS open,count(*) FILTER(WHERE state IN ('RECOVERABLE','APPROVAL_PENDING','RECOVERY_PENDING'))::bigint AS actionable FROM claims WHERE merchant_id=$1")
@@ -1719,6 +3150,8 @@ async fn list_logs(
 #[derive(Debug, Deserialize)]
 struct AgentChatRequest {
     payment_id: String,
+    session_id: Option<String>,
+    email: Option<String>,
     messages: Vec<AgentChatMessage>,
 }
 
@@ -1726,6 +3159,120 @@ struct AgentChatRequest {
 struct AgentChatMessage {
     role: String,
     content: String,
+}
+
+fn find_native_transfer_in_trace(
+    trace: &Value,
+    checkout_address: &str,
+) -> Option<(String, String)> {
+    let destination_matches = trace
+        .get("to")
+        .and_then(Value::as_str)
+        .is_some_and(|address| address.eq_ignore_ascii_case(checkout_address));
+    let transferred_value = trace
+        .get("value")
+        .and_then(Value::as_str)
+        .and_then(|value| value.strip_prefix("0x"))
+        .and_then(|value| u128::from_str_radix(value, 16).ok())
+        .unwrap_or_default();
+    if destination_matches && transferred_value > 0 {
+        return Some((
+            trace
+                .get("from")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            trace
+                .get("value")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+        ));
+    }
+    trace
+        .get("calls")
+        .and_then(Value::as_array)
+        .and_then(|calls| {
+            calls
+                .iter()
+                .find_map(|call| find_native_transfer_in_trace(call, checkout_address))
+        })
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedTransaction {
+    effective_sender: String,
+    effective_destination: String,
+    value_hex: String,
+    used_internal_call: bool,
+}
+
+async fn resolve_transaction_tool(
+    state: &AppState,
+    chain: &ChainConfig,
+    tx_hash: &str,
+    checkout_address: &str,
+) -> Result<Option<ResolvedTransaction>, ApiError> {
+    let rpc_payload = state
+        .http
+        .post(&chain.rpc_url)
+        .json(
+            &json!({"jsonrpc":"2.0","id":1,"method":"eth_getTransactionByHash","params":[tx_hash]}),
+        )
+        .send()
+        .await
+        .map_err(internal)?
+        .json::<Value>()
+        .await
+        .map_err(internal)?;
+    let transaction = rpc_payload
+        .get("result")
+        .filter(|value| !value.is_null())
+        .ok_or_else(|| {
+            ApiError::bad(
+                "transaction_not_found",
+                "transaction was not found on the claimed network",
+            )
+        })?;
+    let top_level_to = transaction
+        .get("to")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if top_level_to.eq_ignore_ascii_case(checkout_address) {
+        return Ok(Some(ResolvedTransaction {
+            effective_sender: transaction
+                .get("from")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            effective_destination: checkout_address.to_owned(),
+            value_hex: transaction
+                .get("value")
+                .and_then(Value::as_str)
+                .unwrap_or("0x0")
+                .to_owned(),
+            used_internal_call: false,
+        }));
+    }
+    let trace_payload = state
+        .http
+        .post(&chain.rpc_url)
+        .json(&json!({"jsonrpc":"2.0","id":1,"method":"debug_traceTransaction","params":[tx_hash,{"tracer":"callTracer"}]}))
+        .send()
+        .await
+        .map_err(internal)?
+        .json::<Value>()
+        .await
+        .map_err(internal)?;
+    Ok(trace_payload
+        .get("result")
+        .and_then(|trace| find_native_transfer_in_trace(trace, checkout_address))
+        .map(|(sender, value_hex)| ResolvedTransaction {
+            effective_sender: sender,
+            effective_destination: checkout_address.to_owned(),
+            value_hex,
+            used_internal_call: true,
+        }))
 }
 
 /// Lightweight agent chat endpoint for the checkout page.
@@ -1743,50 +3290,280 @@ async fn agent_chat(
         .get_payment(merchant, &req.payment_id)
         .await
         .map_err(map_store)?;
+    let supplied_email = req
+        .email
+        .as_deref()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    let email = if supplied_email.contains('@') {
+        supplied_email
+    } else {
+        req.messages
+            .iter()
+            .rev()
+            .filter(|message| message.role.eq_ignore_ascii_case("user"))
+            .flat_map(|message| message.content.split_whitespace().rev())
+            .map(|word| {
+                word.trim_matches(|character: char| {
+                    !character.is_ascii_alphanumeric()
+                        && !matches!(character, '@' | '.' | '_' | '+' | '-')
+                })
+                .to_ascii_lowercase()
+            })
+            .find(|candidate| {
+                let mut parts = candidate.split('@');
+                let local = parts.next().unwrap_or_default();
+                let domain = parts.next().unwrap_or_default();
+                !local.is_empty()
+                    && domain.contains('.')
+                    && parts.next().is_none()
+                    && candidate.len() <= 254
+            })
+            .unwrap_or_default()
+    };
+    let email_verified = email.contains('@') && email.len() <= 254;
+    let session_id = req.session_id.as_deref().unwrap_or_default().trim();
+    if session_id.len() < 8 || session_id.len() > 128 {
+        return Err(ApiError::bad(
+            "invalid_chat_session",
+            "chat session is invalid",
+        ));
+    }
+    let latest_user_text = req
+        .messages
+        .iter()
+        .rev()
+        .find(|message| message.role.eq_ignore_ascii_case("user"))
+        .map(|message| message.content.trim().to_ascii_lowercase())
+        .unwrap_or_default();
+    let greeting = latest_user_text
+        .trim_matches(|character: char| !character.is_alphanumeric() && !character.is_whitespace());
+    if matches!(
+        greeting,
+        "hi" | "hello" | "hey" | "hiya" | "howdy" | "hi there" | "hello there" | "hey there"
+    ) {
+        return Ok(Json(json!({
+            "reply":"Hi. What would you like help with today?",
+            "email":if email_verified { Some(&email) } else { None }
+        })));
+    }
+    let user_conversation = req
+        .messages
+        .iter()
+        .filter(|message| message.role.eq_ignore_ascii_case("user"))
+        .map(|message| message.content.to_ascii_lowercase())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let recovery_intent_from_user = [
+        "wrong asset",
+        "wrong token",
+        "wrong network",
+        "recover",
+        "refund",
+        "sent by mistake",
+        "instead of",
+    ]
+    .iter()
+    .any(|phrase| user_conversation.contains(phrase));
+    let user_network = if user_conversation.contains("base") {
+        Some("base sepolia".to_owned())
+    } else if user_conversation.contains("ethereum sepolia")
+        || user_conversation.contains("eth sepolia")
+        || user_conversation.contains("sepolia")
+    {
+        Some("ethereum sepolia".to_owned())
+    } else {
+        None
+    };
+    let user_token = if user_conversation.split_whitespace().any(|word| {
+        word.trim_matches(|character: char| !character.is_ascii_alphanumeric()) == "eth"
+    }) {
+        Some("ETH".to_owned())
+    } else if user_conversation.contains("usdc") {
+        Some("USDC".to_owned())
+    } else if user_conversation.contains("usdt") {
+        Some("USDT".to_owned())
+    } else {
+        None
+    };
+    let user_tx_hash = req
+        .messages
+        .iter()
+        .filter(|message| message.role.eq_ignore_ascii_case("user"))
+        .flat_map(|message| message.content.split_whitespace())
+        .map(|word| {
+            word.trim_matches(|character: char| !character.is_ascii_hexdigit() && character != 'x')
+        })
+        .find(|word| {
+            word.len() == 66
+                && word.starts_with("0x")
+                && word[2..]
+                    .chars()
+                    .all(|character| character.is_ascii_hexdigit())
+        })
+        .map(str::to_owned);
+    let user_amount = req
+        .messages
+        .iter()
+        .filter(|message| message.role.eq_ignore_ascii_case("user"))
+        .flat_map(|message| message.content.split_whitespace())
+        .map(|word| {
+            word.trim_matches(|character: char| !character.is_ascii_digit() && character != '.')
+        })
+        .find(|word| !word.is_empty() && word.parse::<f64>().is_ok_and(|value| value > 0.0))
+        .map(str::to_owned);
+
+    if recovery_intent_from_user
+        && email_verified
+        && user_network.is_some()
+        && user_token.is_some()
+        && user_amount.is_some()
+        && user_tx_hash.is_some()
+    {
+        let network = user_network.as_deref().unwrap_or_default();
+        let tx_hash = user_tx_hash.as_deref().unwrap_or_default();
+        let chain_key = match network {
+            "ethereum" | "eth" | "ethereum sepolia" | "eth sepolia" => {
+                ChainKey::Custom("ethereum_sepolia".into())
+            }
+            "base" | "base sepolia" => ChainKey::Custom("base_sepolia".into()),
+            "arbitrum" | "arb" | "arb sepolia" => ChainKey::Custom("arbitrum_sepolia".into()),
+            _ => payment.expected_chain.clone(),
+        };
+        let chain = state.config.chains.get(&chain_key).ok_or_else(|| {
+            ApiError::bad(
+                "unsupported_claim_chain",
+                "claimed network is not configured",
+            )
+        })?;
+        if resolve_transaction_tool(&state, chain, tx_hash, &payment.checkout_address.value)
+            .await?
+            .is_some()
+        {
+            if let Some(existing_claim) = sqlx::query_scalar::<_, String>("SELECT public_id FROM claims WHERE payment_id=$1 AND lower(claimed_transaction_hash)=lower($2) ORDER BY created_at DESC LIMIT 1")
+                .bind(payment.id.0).bind(tx_hash).fetch_optional(state.store.pool()).await.map_err(db)?
+            {
+                return Ok(Json(json!({"reply":format!("I called the internal transaction resolver and verified the {} {} transfer to this checkout. Recovery claim {existing_claim} is already under investigation.",user_amount.as_deref().unwrap_or_default(),user_token.as_deref().unwrap_or_default()),"claim_id":existing_claim,"status":"CLAIM_CREATED","email":email})));
+            }
+        }
+    }
+
+    if recovery_intent_from_user {
+        let reply = if user_network.is_none() {
+            Some(
+                "I understand that this is a payment recovery. Which network did you send it on?"
+                    .to_owned(),
+            )
+        } else if user_token.is_none() {
+            Some(format!(
+                "I have the network as {}. Which token did you send?",
+                user_network.as_deref().unwrap_or_default()
+            ))
+        } else if user_amount.is_none() {
+            Some(format!(
+                "I have {} on {}. How much did you send?",
+                user_token.as_deref().unwrap_or_default(),
+                user_network.as_deref().unwrap_or_default()
+            ))
+        } else if user_tx_hash.is_none() {
+            Some(format!(
+                "I have {} {} on {}. What is the transaction hash?",
+                user_amount.as_deref().unwrap_or_default(),
+                user_token.as_deref().unwrap_or_default(),
+                user_network.as_deref().unwrap_or_default()
+            ))
+        } else if !email_verified {
+            Some("I have the transaction details. What email address should I use for investigation updates?".to_owned())
+        } else {
+            None
+        };
+        if let Some(reply) = reply {
+            return Ok(Json(
+                json!({"reply":reply,"email":if email_verified { Some(&email) } else { None }}),
+            ));
+        }
+    }
 
     // Build the Ollama prompt with payment context
     let system_prompt = format!(
-        "You are FlowPay's support agent helping with payment issues. \
+        "You are FlowPay's conversational support agent. \
 You are currently helping with checkout {checkout_id} for {amount} {asset} on {chain}. \
-The checkout address is {address}. \
-\nYour job is to help the user file a claim for a wrong-asset or wrong-chain payment. \
-Ask the user these questions one at a time if they haven't provided them: \
-1. Which network did you send on? (e.g., Ethereum, Base, BSC) \
-2. Which token did you send? (e.g., USDC, USDT, ETH) \
-3. How much did you send? \
-4. What is the transaction hash? \
-\nOnce you have ALL FOUR pieces of information, respond with a JSON object like: \
-{{\"action\":\"submit_claim\",\"network\":\"...\",\"token\":\"...\",\"amount\":\"...\",\"tx_hash\":\"...\",\"message\":\"Submitting your claim now...\"}} \
-\nBe friendly and concise. Guide the user step by step. If the info is incomplete, ask what's missing.",
+The checkout address is {address}. The recovery email is {email_state}. \
+The checkout amount, asset, chain, and address above are merchant expectations only. They are not facts supplied by the user and must never populate network, token, amount, or transaction hash in your JSON. Extract those fields only from user-role messages. The server has retained these user-supplied facts so far: network={user_network}, token={user_token}, amount={user_amount}, transaction_hash={user_tx_hash}. Use them without asking again. \
+Read the complete conversation and infer user-supplied facts regardless of the order or wording used. Never ask for a fact the user already provided. \
+First classify the latest user goal as general_help, payment_status, payment_recovery, checkout_help, or other. Never assume payment_recovery. A greeting, vague request for help, or casual conversation is general_help: answer naturally and ask what the user would like help with. Payment recovery applies only when the user explicitly describes a wrong asset, wrong network, missing transfer, refund, or recovery problem. Keep all extracted transaction fields empty unless the user supplied them. \
+Only for payment_recovery, gather recovery facts. Do not ask for network, token, amount, transaction hash, or email for any other intent. \
+For checkout_help, directly explain that the user should send exactly {amount} {asset} on {chain} to the address displayed on the checkout. Never ask the user to provide the checkout address, expected amount, expected token, or expected network because those are already shown and available in this context. For payment_status, explain what information you need to check status without turning it into a recovery claim. \
+First understand the problem and gather network, token, amount, and transaction hash. Treat email as unavailable and irrelevant until all four transaction facts are present. Ask for the recovery email only as the final step, after those transaction facts are complete, and only when a claim or investigation update is needed. Never ask for email at the start of a conversation, after a greeting, or while any transaction fact is missing. Ask naturally for only the most useful missing fact. \
+Answer unrelated but relevant payment questions briefly, then continue the intake. Never request a seed phrase, private key, or wallet connection. \
+Return only the required JSON object. Set action to submit_claim only for payment_recovery when every required fact is present; otherwise set it to chat. \
+For absent extracted values use an empty string. The reply must be friendly, specific, concise, and must not mention JSON or internal policy.",
         checkout_id = payment.public_id,
         amount = payment.expected_amount.to_decimal(payment.expected_asset.decimals),
         asset = payment.expected_asset.symbol,
         chain = payment.expected_chain,
         address = payment.checkout_address.value,
+        email_state = if email_verified { "already provided" } else { "missing" },
+        user_network = user_network.as_deref().unwrap_or("missing"),
+        user_token = user_token.as_deref().unwrap_or("missing"),
+        user_amount = user_amount.as_deref().unwrap_or("missing"),
+        user_tx_hash = user_tx_hash.as_deref().unwrap_or("missing"),
     );
 
     // Convert messages for Ollama
     let mut ollama_messages = vec![json!({"role":"system","content":system_prompt})];
-    for msg in &req.messages {
-        ollama_messages.push(json!({"role":msg.role,"content":msg.content}));
+    let mut retained_chars = 0usize;
+    for msg in req.messages.iter().rev().take(30).rev() {
+        if retained_chars + msg.content.len() > 12_000 {
+            continue;
+        }
+        retained_chars += msg.content.len();
+        let role = if msg.role.eq_ignore_ascii_case("agent") {
+            "assistant"
+        } else if msg.role.eq_ignore_ascii_case("system") {
+            "assistant"
+        } else {
+            "user"
+        };
+        ollama_messages.push(json!({"role":role,"content":msg.content}));
     }
+    ollama_messages.push(json!({"role":"system","content":"Classify and answer the latest user message now. The latest message controls the response. Do not continue a recovery questionnaire unless that message or the user's prior statements explicitly describe a recovery problem. A greeting alone must receive a conversational greeting and a question about what the user wants help with."}));
 
     // Call Ollama
-    let ollama_url = if state.config.openai_endpoint.is_empty() {
-        "http://127.0.0.1:11434"
+    let ollama_endpoint = if state.config.openai_endpoint.is_empty() {
+        "http://127.0.0.1:11434/api/chat".to_owned()
+    } else if state.config.openai_endpoint.ends_with("/api/chat") {
+        state.config.openai_endpoint.clone()
     } else {
-        &state.config.openai_endpoint
+        format!(
+            "{}/api/chat",
+            state.config.openai_endpoint.trim_end_matches('/')
+        )
     };
     let ollama_model = &state.config.openai_model;
     let response = state
         .http
-        .post(format!("{ollama_url}/api/chat"))
-        .timeout(StdDuration::from_secs(30))
+        .post(ollama_endpoint)
+        .timeout(StdDuration::from_secs(45))
         .json(&json!({
             "model": ollama_model,
             "messages": ollama_messages,
             "stream": false,
-            "options": {"temperature": 0}
+            "format": {
+                "type":"object",
+                "properties":{
+                    "intent":{"type":"string","enum":["general_help","payment_status","payment_recovery","checkout_help","other"]},
+                    "action":{"type":"string","enum":["chat","submit_claim"]},
+                    "reply":{"type":"string"},
+                    "network":{"type":"string"},
+                    "token":{"type":"string"},
+                    "amount":{"type":"string"},
+                    "tx_hash":{"type":"string"}
+                },
+                "required":["intent","action","reply","network","token","amount","tx_hash"]
+            },
+            "options": {"temperature": 0.2,"num_ctx":4096,"num_predict":100,"repeat_penalty":1.1}
         }))
         .send()
         .await;
@@ -1794,23 +3571,36 @@ Ask the user these questions one at a time if they haven't provided them: \
     match response {
         Ok(resp) if resp.status().is_success() => {
             let payload: Value = resp.json().await.map_err(internal)?;
-            let content = payload
+            let model_content = payload
                 .pointer("/message/content")
                 .and_then(Value::as_str)
                 .unwrap_or("I'm here to help. Could you tell me more about your issue?");
+            let parsed_model = serde_json::from_str::<Value>(model_content).unwrap_or_else(|_| {
+                let trimmed = model_content.trim_start();
+                let safe_reply = if trimmed.starts_with('{')
+                    || trimmed.starts_with('[')
+                    || model_content.contains("\"action\"")
+                    || model_content.contains("\"intent\"")
+                {
+                    ""
+                } else {
+                    model_content
+                };
+                json!({"intent":"other","action":"chat","reply":safe_reply,"network":"","token":"","amount":"","tx_hash":""})
+            });
+            let content = parsed_model.to_string();
 
             // Check if the agent decided to submit a claim
-            if let Ok(parsed) = serde_json::from_str::<Value>(content) {
-                if parsed.get("action").and_then(Value::as_str) == Some("submit_claim") {
-                    let network = parsed.get("network").and_then(Value::as_str).unwrap_or("");
-                    let token = parsed.get("token").and_then(Value::as_str).unwrap_or("");
-                    let amount = parsed.get("amount").and_then(Value::as_str).unwrap_or("");
-                    let tx_hash = parsed.get("tx_hash").and_then(Value::as_str).unwrap_or("");
-                    let msg = parsed
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("Submitting claim...");
-
+            if serde_json::from_str::<Value>(&content).is_ok() {
+                let complete_claim = user_network.is_some()
+                    && user_token.is_some()
+                    && user_amount.is_some()
+                    && user_tx_hash.is_some();
+                if email_verified && complete_claim && recovery_intent_from_user {
+                    let network = user_network.as_deref().unwrap_or("");
+                    let token = user_token.as_deref().unwrap_or("");
+                    let amount = user_amount.as_deref().unwrap_or("");
+                    let tx_hash = user_tx_hash.as_deref().unwrap_or("");
                     // Map network string to ChainKey
                     let chain_key = match network.to_lowercase().as_str() {
                         "ethereum" | "eth" | "ethereum sepolia" | "eth sepolia" => {
@@ -1823,6 +3613,32 @@ Ask the user these questions one at a time if they haven't provided them: \
                         _ => payment.expected_chain.clone(),
                     };
 
+                    let chain = state.config.chains.get(&chain_key).ok_or_else(|| {
+                        ApiError::bad(
+                            "unsupported_claim_chain",
+                            "claimed network is not configured",
+                        )
+                    })?;
+                    let Some(resolved) = resolve_transaction_tool(
+                        &state,
+                        chain,
+                        tx_hash,
+                        &payment.checkout_address.value,
+                    )
+                    .await?
+                    else {
+                        return Ok(Json(json!({
+                            "reply":format!("I traced the full transaction execution, but found no value transfer to this checkout address {}. Check that the hash belongs to this payment.",payment.checkout_address.value),
+                            "status":"PAYMENT_ADDRESS_MISMATCH"
+                        })));
+                    };
+                    let originating_wallet = resolved.effective_sender.clone();
+                    if let Some(existing_claim) = sqlx::query_scalar::<_, String>("SELECT public_id FROM claims WHERE payment_id=$1 AND lower(claimed_transaction_hash)=lower($2) ORDER BY created_at DESC LIMIT 1")
+                        .bind(payment.id.0).bind(tx_hash).fetch_optional(state.store.pool()).await.map_err(db)?
+                    {
+                        return Ok(Json(json!({"reply":format!("I resolved the transaction and verified its transfer to this checkout. Recovery claim {existing_claim} is already under investigation."),"claim_id":existing_claim,"status":"CLAIM_CREATED","email":email})));
+                    }
+
                     // Create the claim via existing infrastructure
                     let claim_id = ClaimId::new();
                     let public_id = format!("clm_{}", claim_id.0.simple());
@@ -1831,14 +3647,14 @@ Ask the user these questions one at a time if they haven't provided them: \
                         public_id: public_id.clone(),
                         merchant_id: merchant,
                         payment_id: payment.id,
-                        state: ClaimState::AwaitingEvidence,
+                        state: ClaimState::Investigating,
                         expected_chain: payment.expected_chain.clone(),
-                        claimed_chain: Some(chain_key),
+                        claimed_chain: Some(chain_key.clone()),
                         expected_asset: payment.expected_asset.symbol.clone(),
                         claimed_asset: Some(token.to_owned()),
                         transaction_hash: Some(tx_hash.to_owned()),
-                        originating_wallet: None,
-                        recovery_destination: payment.checkout_address.value.clone(),
+                        originating_wallet: Some(originating_wallet.clone()),
+                        recovery_destination: originating_wallet.clone(),
                         explanation: format!(
                             "Wrong asset: sent {} {} (expected {} {}) on {}",
                             amount,
@@ -1851,16 +3667,83 @@ Ask the user these questions one at a time if they haven't provided them: \
                         ),
                     };
                     state.store.create_claim(&claim).await.map_err(db)?;
+                    state
+                        .store
+                        .set_payment_state(
+                            payment.id,
+                            PaymentState::ClaimPending,
+                            "agent_intake_submitted",
+                            Some(&chain_key),
+                            Some(tx_hash),
+                        )
+                        .await
+                        .map_err(db)?;
+                    sqlx::query("INSERT INTO agent_chat_intakes(id,payment_id,claim_id,session_id,email,gathered_data) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(payment_id,session_id) DO UPDATE SET claim_id=EXCLUDED.claim_id,email=EXCLUDED.email,gathered_data=EXCLUDED.gathered_data,updated_at=now()")
+                        .bind(Uuid::now_v7()).bind(payment.id.0).bind(claim_id.0).bind(session_id).bind(&email)
+                        .bind(json!({"network":network,"token":token,"amount":amount,"transaction_hash":tx_hash,"originating_wallet":originating_wallet,"resolution":{"tool":"resolve_transaction","effective_destination":resolved.effective_destination,"value_hex":resolved.value_hex,"used_internal_call":resolved.used_internal_call}}))
+                        .execute(state.store.pool()).await.map_err(db)?;
 
                     return Ok(Json(json!({
-                        "reply": msg,
+                        "reply":format!("I resolved the transaction and verified the {} {} transfer to this checkout{}. Recovery claim {public_id} is now under investigation.",amount,token,if resolved.used_internal_call { " through an internal smart-account call" } else { "" }),
                         "claim_id": public_id,
-                        "status": "CLAIM_CREATED"
+                        "status": "CLAIM_CREATED",
+                        "email":email
                     })));
                 }
             }
 
-            Ok(Json(json!({"reply": content})))
+            let response_value = serde_json::from_str::<Value>(&content).unwrap_or(Value::Null);
+            let recovery_intent = recovery_intent_from_user;
+            let mut reply = response_value
+                .get("reply")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| {
+                    if recovery_intent {
+                        "Tell me what happened with this payment and I will investigate it."
+                            .to_owned()
+                    } else {
+                        "What would you like help with today? I can explain this checkout, check a payment, or help with a recovery.".to_owned()
+                    }
+                });
+            let missing_transaction_question = if !recovery_intent {
+                None
+            } else if user_network.is_none() {
+                Some("I understand that you sent a different asset to this checkout. Which network did you send it on?".to_owned())
+            } else if user_token.is_none() {
+                Some(format!(
+                    "Thanks, I have the network as {}. Which token did you send?",
+                    user_network.as_deref().unwrap_or_default()
+                ))
+            } else if user_amount.is_none() {
+                Some(format!(
+                    "Thanks, I have {} on {}. How much did you send?",
+                    user_token.as_deref().unwrap_or_default(),
+                    user_network.as_deref().unwrap_or_default()
+                ))
+            } else if user_tx_hash.is_none() {
+                Some(format!(
+                    "I have {} {} on {}. What is the transaction hash?",
+                    user_amount.as_deref().unwrap_or_default(),
+                    user_token.as_deref().unwrap_or_default(),
+                    user_network.as_deref().unwrap_or_default()
+                ))
+            } else {
+                None
+            };
+            if let Some(question) = missing_transaction_question.as_deref() {
+                reply = question.to_owned();
+            } else if recovery_intent && !email_verified {
+                let asks_for_email = reply.to_ascii_lowercase().contains("email");
+                if !asks_for_email {
+                    reply.push(' ');
+                    reply.push_str("What email address should I use for investigation updates?");
+                }
+            }
+            Ok(Json(
+                json!({"reply": reply,"email":if email_verified { Some(&email) } else { None }}),
+            ))
         }
         _ => {
             // Ollama unavailable — fall back to simple guided flow
@@ -1871,12 +3754,37 @@ Ask the user these questions one at a time if they haven't provided them: \
                 .find(|m| m.role == "user")
                 .map_or("", |m| m.content.as_str());
             let lower = last_user.to_lowercase();
-            let reply = if req.messages.len() <= 1 {
-                "I can help you with that! Let me ask a few questions:\n\n1. Which network did you send on? (e.g., Ethereum, Base)\n2. Which token did you send? (e.g., USDC, ETH)\n3. How much did you send?\n4. What is the transaction hash?".to_string()
-            } else if lower.contains("tx") || lower.contains("0x") {
-                "Got it! I have your transaction hash. Could you also tell me the network, token, and amount if you haven't already?".to_string()
+            let normalized = lower.trim().trim_matches(|c: char| !c.is_alphanumeric());
+            let is_greeting = matches!(normalized, "hi" | "hello" | "hey" | "hiya" | "howdy");
+            let reply = if is_greeting {
+                "Hi. What would you like help with today?".to_string()
+            } else if !recovery_intent_from_user {
+                "I can help with this checkout, payment status, or a payment recovery. What would you like me to look into?".to_string()
+            } else if user_network.is_none() {
+                "I understand that this is a recovery. Which network did you send it on?"
+                    .to_string()
+            } else if user_token.is_none() {
+                format!(
+                    "I have the network as {}. Which token did you send?",
+                    user_network.as_deref().unwrap_or_default()
+                )
+            } else if user_amount.is_none() {
+                format!(
+                    "I have {} on {}. How much did you send?",
+                    user_token.as_deref().unwrap_or_default(),
+                    user_network.as_deref().unwrap_or_default()
+                )
+            } else if user_tx_hash.is_none() {
+                format!(
+                    "I have {} {} on {}. What is the transaction hash?",
+                    user_amount.as_deref().unwrap_or_default(),
+                    user_token.as_deref().unwrap_or_default(),
+                    user_network.as_deref().unwrap_or_default()
+                )
+            } else if !email_verified {
+                "I have the transaction details. What email address should I use for investigation updates?".to_string()
             } else {
-                "Thanks! I'm still missing some details. Please provide: network, token, amount, and transaction hash.".to_string()
+                "I have all the recovery details. The investigation service is taking longer than expected; please send continue to retry submission.".to_string()
             };
             Ok(Json(json!({"reply": reply})))
         }
@@ -1888,6 +3796,29 @@ mod alchemy_checkout_sync_tests {
     use super::*;
     use crate::config::Config;
     use std::collections::HashMap;
+
+    #[test]
+    fn nested_smart_account_native_transfer_is_found() {
+        let trace = json!({
+            "to":"0xentrypoint",
+            "value":"0x0",
+            "calls":[{"from":"0xsmartaccount","to":"0xCheckout","value":"0x5af3107a4000"}]
+        });
+        assert_eq!(
+            find_native_transfer_in_trace(&trace, "0xcheckout"),
+            Some(("0xsmartaccount".to_owned(), "0x5af3107a4000".to_owned()))
+        );
+    }
+
+    #[test]
+    fn zero_value_or_wrong_destination_is_not_a_transfer() {
+        let trace = json!({
+            "to":"0xentrypoint",
+            "value":"0x0",
+            "calls":[{"from":"0xsmartaccount","to":"0xother","value":"0x5af3107a4000"}]
+        });
+        assert_eq!(find_native_transfer_in_trace(&trace, "0xcheckout"), None);
+    }
 
     fn test_config() -> Config {
         let mut chains = HashMap::new();
@@ -1944,6 +3875,19 @@ mod alchemy_checkout_sync_tests {
             alchemy_webhook_ids: HashMap::new(),
             alchemy_notify_endpoint: "https://dashboard.alchemy.com/api/update-webhook-addresses"
                 .into(),
+            flutterwave_base_url: "https://api.flutterwave.com/v3".into(),
+            flutterwave_secret_key: None,
+            flutterwave_secret_hash: None,
+            flutterwave_customer_email: "info@landaa.xyz".into(),
+            flutterwave_customer_first_name: "Lander".into(),
+            flutterwave_customer_last_name: "Global LTD".into(),
+            ngn_platform_fee_atomic: 5_000,
+            admin_key: None,
+            flutterwave_fee_bps: 200,
+            flutterwave_fee_vat_bps: 750,
+            formance_base_url: "http://127.0.0.1:8081".into(),
+            formance_ledger: "flowpay".into(),
+            formance_token: None,
         }
     }
 

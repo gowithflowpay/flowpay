@@ -28,7 +28,6 @@ pub const MIGRATION_0009_CHAIN_AWARE_MONITORING: &str =
     include_str!("../../../database/migrations/0009_chain_aware_monitoring.sql");
 pub const MIGRATION_0010_SECURITY_HARDENING: &str =
     include_str!("../../../database/migrations/0010_security_hardening.sql");
-
 #[derive(Debug, Error)]
 pub enum StoreError {
     #[error("database error: {0}")]
@@ -238,6 +237,13 @@ impl PgStore {
         public_id: &str,
     ) -> Result<Payment, StoreError> {
         let row=sqlx::query("SELECT p.*, p.expected_amount_atomic::text AS expected_amount_text, c.address FROM payments p JOIN checkout_addresses c ON c.payment_id=p.id AND c.chain=p.expected_chain WHERE p.merchant_id=$1 AND p.public_id=$2").bind(merchant_id.0).bind(public_id).fetch_optional(&self.pool).await?.ok_or(StoreError::NotFound)?;
+        payment_from_row(&row)
+    }
+
+    /// Looks a payment up by its public identifier alone. The customer-facing
+    /// checkout has no merchant credential, so it resolves payments this way.
+    pub async fn get_payment_by_public_id(&self, public_id: &str) -> Result<Payment, StoreError> {
+        let row=sqlx::query("SELECT p.*, p.expected_amount_atomic::text AS expected_amount_text, c.address FROM payments p JOIN checkout_addresses c ON c.payment_id=p.id AND c.chain=p.expected_chain WHERE p.public_id=$1").bind(public_id).fetch_optional(&self.pool).await?.ok_or(StoreError::NotFound)?;
         payment_from_row(&row)
     }
 

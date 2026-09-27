@@ -27,3 +27,4 @@ contracts/out
 alchemy-webhook.txt
 deployer-pk.txt
 *.png
+!apps/checkout/public/assets/glossy-neon-robot-assistant-icon.png

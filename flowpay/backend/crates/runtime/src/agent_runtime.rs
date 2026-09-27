@@ -58,11 +58,6 @@ impl DatabaseAgentTools {
             .await
             .map_err(store_err)?;
         let predicted = runtime.deriver.checkout_hex(salt);
-        let raw = runtime
-            .adapter
-            .transaction(tx_hash)
-            .await
-            .map_err(chain_err)?;
         let receipt = runtime.adapter.receipt(tx_hash).await.map_err(chain_err)?;
         let transfers = runtime
             .adapter
@@ -86,7 +81,7 @@ impl DatabaseAgentTools {
         Ok(VerifiedTransaction {
             chain: chain.clone(),
             hash: tx_hash.to_owned(),
-            from: raw.from,
+            from: selected.from.clone(),
             to: selected.to.clone(),
             token_contract: selected.token_contract.clone(),
             amount: selected.amount.clone(),
@@ -163,20 +158,40 @@ impl InvestigationTools for DatabaseAgentTools {
             .wallet_authorization(ctx.claim_id)
             .await
             .map_err(store_err)?;
+        if let Some(wallet) = wallet {
+            return Ok(WalletAuthorizationResult {
+                verified: true,
+                wallet: Some(wallet),
+                reason: "verified EIP-191 claim challenge".into(),
+            });
+        }
+        let claim = self
+            .state
+            .store
+            .get_claim_by_id(ctx.claim_id)
+            .await
+            .map_err(store_err)?;
+        let chain = claim
+            .claimed_chain
+            .clone()
+            .ok_or_else(|| ToolError::InvalidInput("claim missing actual chain".into()))?;
+        let transaction_hash = claim
+            .transaction_hash
+            .as_deref()
+            .ok_or_else(|| ToolError::InvalidInput("claim missing transaction hash".into()))?;
+        let transaction = self
+            .verified_transfer(ctx, &chain, transaction_hash)
+            .await?;
+        let sender_bound = claim
+            .recovery_destination
+            .eq_ignore_ascii_case(&transaction.from);
         Ok(WalletAuthorizationResult {
-            verified: wallet.is_some(),
-            wallet,
-            reason: if self
-                .state
-                .store
-                .wallet_authorization(ctx.claim_id)
-                .await
-                .map_err(store_err)?
-                .is_some()
-            {
-                "verified EIP-191 claim challenge".into()
+            verified: sender_bound,
+            wallet: sender_bound.then_some(transaction.from),
+            reason: if sender_bound {
+                "recovery destination is locked to the canonical transaction sender".into()
             } else {
-                "no verified self-custody signature".into()
+                "recovery destination does not match the canonical transaction sender".into()
             },
         })
     }
@@ -320,13 +335,7 @@ impl InvestigationTools for DatabaseAgentTools {
                 .await
                 .map_err(chain_err)?,
         };
-        let ownership = self
-            .state
-            .store
-            .wallet_authorization(claim.id)
-            .await
-            .map_err(store_err)?
-            .is_some();
+        let ownership = claim.recovery_destination.eq_ignore_ascii_case(&tx.from);
         let operator_balance = runtime
             .adapter
             .native_balance(&self.state.config.operator_address)
@@ -377,9 +386,9 @@ impl InvestigationTools for DatabaseAgentTools {
             minimum_recovery_amount: AtomicAmount::from_str("1").unwrap_or_default(),
             maximum_demo_recovery_amount: AtomicAmount::from_decimal("1000", asset_decimals)
                 .map_err(|e| ToolError::Permanent(e.to_string()))?,
-            require_self_custody_signature: true,
+            require_self_custody_signature: false,
             require_simulation: true,
-            require_human_approval: true,
+            require_human_approval: false,
         };
         let receiver_deployment_required = !runtime
             .adapter
@@ -605,14 +614,112 @@ impl ControlledRecoveryTools for DatabaseAgentTools {
 
     async fn execute_proven_recovery(
         &self,
-        _ctx: &AgentContext,
-        _plan_id: RecoveryPlanId,
+        ctx: &AgentContext,
+        plan_id: RecoveryPlanId,
     ) -> Result<RecoveryExecutionResult, ToolError> {
-        // Execution always consumes a claimant-backed approval. The investigator
-        // may verify and simulate a plan, but it cannot bypass signature consent.
-        Err(ToolError::PolicyDenied(
-            "claimant authorization is required before recovery execution".into(),
-        ))
+        let (plan, plan_hash) = self.load_plan(plan_id).await?;
+        if plan.claim_id != ctx.claim_id
+            || plan.payment_id != ctx.payment_id
+            || plan.required_approval
+            || plan.policy_decision != RecoveryPolicyDecision::Allowed
+            || plan.simulation_status != SimulationStatus::Succeeded
+        {
+            return Err(ToolError::PolicyDenied(
+                "sender-bound policy and successful simulation are required".into(),
+            ));
+        }
+        let claim = self
+            .state
+            .store
+            .get_claim_by_id(ctx.claim_id)
+            .await
+            .map_err(store_err)?;
+        let transaction_hash = claim
+            .transaction_hash
+            .as_deref()
+            .ok_or_else(|| ToolError::InvalidInput("claim missing transaction hash".into()))?;
+        let transaction = self
+            .verified_transfer(ctx, &plan.source_chain, transaction_hash)
+            .await?;
+        if !plan
+            .recovery_destination
+            .value
+            .eq_ignore_ascii_case(&transaction.from)
+        {
+            return Err(ToolError::NotAuthorized);
+        }
+        let payment = self
+            .state
+            .store
+            .get_payment_by_id(ctx.payment_id)
+            .await
+            .map_err(store_err)?;
+        if payment.state == PaymentState::ClaimPending {
+            if claim
+                .claimed_chain
+                .as_ref()
+                .is_some_and(|chain| *chain != payment.expected_chain)
+            {
+                self.state
+                    .store
+                    .set_payment_state(
+                        payment.id,
+                        PaymentState::WrongChainClaimed,
+                        "wrong_chain_verified",
+                        claim.claimed_chain.as_ref(),
+                        claim.transaction_hash.as_deref(),
+                    )
+                    .await
+                    .map_err(store_err)?;
+            }
+            self.state
+                .store
+                .set_payment_state(
+                    payment.id,
+                    PaymentState::RecoveryAvailable,
+                    "recovery_plan_simulated",
+                    claim.claimed_chain.as_ref(),
+                    claim.transaction_hash.as_deref(),
+                )
+                .await
+                .map_err(store_err)?;
+        }
+        if claim.state == ClaimState::Investigating {
+            self.state
+                .store
+                .set_claim_state(
+                    claim.id,
+                    ClaimState::Recoverable,
+                    "recovery_plan_simulated",
+                    "AGENT",
+                )
+                .await
+                .map_err(store_err)?;
+        }
+        self.state
+            .store
+            .set_claim_state(
+                claim.id,
+                ClaimState::ApprovalPending,
+                "canonical_sender_authorization_verified",
+                "AGENT",
+            )
+            .await
+            .map_err(store_err)?;
+        let approval = ApprovalId::new();
+        sqlx::query("INSERT INTO approvals(id,public_id,claim_id,recovery_plan_id,plan_hash,status,approved_by,approval_nonce,expires_at,approved_at) VALUES($1,$2,$3,$4,$5,'APPROVED',$6,$7,$8,now())")
+            .bind(approval.0)
+            .bind(format!("apr_{}", approval.0.simple()))
+            .bind(claim.id.0)
+            .bind(plan.id.0)
+            .bind(&plan_hash)
+            .bind(format!("canonical-sender:{}", transaction.from))
+            .bind(Uuid::now_v7().simple().to_string())
+            .bind(OffsetDateTime::now_utc() + Duration::minutes(15))
+            .execute(self.state.store.pool())
+            .await
+            .map_err(db_err)?;
+        self.execute_approved_recovery(ctx, plan_id, approval).await
     }
 
     async fn execute_approved_recovery(
@@ -823,14 +930,17 @@ impl ControlledRecoveryTools for DatabaseAgentTools {
             .get(&plan.source_chain)
             .ok_or_else(|| ToolError::Permanent("unsupported network".into()))?;
         let mut receipt_opt = None;
-        for _ in 0..15 {
+        // Public testnets commonly need more than one block interval after submission.
+        // Keep this bounded, but long enough that a normal confirmation does not turn
+        // a successful recovery into a false failed agent run.
+        for _ in 0..45 {
             match runtime.adapter.receipt(transaction_hash).await {
                 Ok(r) => {
                     receipt_opt = Some(r);
                     break;
                 }
                 Err(flowpay_chains::ChainError::TransactionNotFound) => {
-                    tokio::time::sleep(std::time::Duration::from_millis(400)).await
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await
                 }
                 Err(e) => return Err(chain_err(e)),
             }

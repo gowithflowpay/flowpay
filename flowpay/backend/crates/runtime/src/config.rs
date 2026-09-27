@@ -42,6 +42,37 @@ pub struct Config {
     pub alchemy_notify_auth_token: Option<String>,
     pub alchemy_webhook_ids: HashMap<ChainKey, String>,
     pub alchemy_notify_endpoint: String,
+    pub flutterwave_base_url: String,
+    pub flutterwave_secret_key: Option<String>,
+    pub flutterwave_secret_hash: Option<String>,
+    pub flutterwave_customer_email: String,
+    pub flutterwave_customer_first_name: String,
+    pub flutterwave_customer_last_name: String,
+    /// Flat platform fee, in minor NGN units, added to every bank-transfer
+    /// total so the platform earns revenue on each collected payment.
+    pub ngn_platform_fee_atomic: u64,
+    /// Credential for the platform admin surface (revenue reporting).
+    pub admin_key: Option<String>,
+    /// Flutterwave's transaction fee, in basis points of the charged amount.
+    pub flutterwave_fee_bps: u64,
+    /// VAT charged on Flutterwave's fee, in basis points of that fee.
+    pub flutterwave_fee_vat_bps: u64,
+    pub formance_base_url: String,
+    pub formance_ledger: String,
+    pub formance_token: Option<String>,
+    /// Outbound SMTP relay used for signup and login verification codes.
+    pub smtp_host: Option<String>,
+    pub smtp_port: u16,
+    pub smtp_username: Option<String>,
+    pub smtp_password: Option<String>,
+    pub mail_from: String,
+    pub mail_from_name: String,
+    /// How long a session stays valid before the merchant must sign in again.
+    pub auth_session_ttl_hours: i64,
+    /// How long an emailed verification code stays usable.
+    pub auth_code_ttl_minutes: i64,
+    /// Public base URL of the merchant dashboard, used in any links we email.
+    pub dashboard_base_url: String,
 }
 
 impl Config {
@@ -180,6 +211,78 @@ impl Config {
             alchemy_notify_endpoint: env::var("ALCHEMY_NOTIFY_ENDPOINT").unwrap_or_else(|_| {
                 "https://dashboard.alchemy.com/api/update-webhook-addresses".into()
             }),
+            flutterwave_base_url: env::var("FLW_BASE_URL")
+                .unwrap_or_else(|_| "https://api.flutterwave.com/v3".into())
+                .trim_end_matches('/')
+                .to_owned(),
+            flutterwave_secret_key: env::var("FLW_V3_SECRET_KEY")
+                .or_else(|_| env::var("FLW_SECRET_KEY"))
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
+            flutterwave_secret_hash: env::var("FLW_SECRET_HASH")
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
+            flutterwave_customer_email: env::var("FLW_CUSTOMER_EMAIL")
+                .unwrap_or_else(|_| "info@landaa.xyz".into()),
+            flutterwave_customer_first_name: env::var("FLW_CUSTOMER_FIRST_NAME")
+                .unwrap_or_else(|_| "FlowPay".into()),
+            flutterwave_customer_last_name: env::var("FLW_CUSTOMER_LAST_NAME")
+                .unwrap_or_else(|_| String::new()),
+            ngn_platform_fee_atomic: env::var("FLOWPAY_NGN_PLATFORM_FEE")
+                .ok()
+                .and_then(|value| value.trim().parse().ok())
+                .unwrap_or(5_000),
+            admin_key: env::var("FLOWPAY_ADMIN_KEY")
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
+            flutterwave_fee_bps: env::var("FLW_FEE_BPS")
+                .ok()
+                .and_then(|value| value.trim().parse().ok())
+                .unwrap_or(200),
+            flutterwave_fee_vat_bps: env::var("FLW_FEE_VAT_BPS")
+                .ok()
+                .and_then(|value| value.trim().parse().ok())
+                .unwrap_or(750),
+            formance_base_url: env::var("FORMANCE_BASE_URL")
+                .unwrap_or_else(|_| "http://127.0.0.1:8081".into())
+                .trim_end_matches('/')
+                .to_owned(),
+            formance_ledger: env::var("FORMANCE_LEDGER").unwrap_or_else(|_| "flowpay".into()),
+            formance_token: env::var("FORMANCE_TOKEN")
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
+            smtp_host: env::var("SMTP_HOST")
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
+            smtp_port: env::var("SMTP_PORT")
+                .ok()
+                .and_then(|value| value.trim().parse().ok())
+                .unwrap_or(587),
+            smtp_username: env::var("SMTP_USERNAME")
+                .or_else(|_| env::var("SMTP_USER"))
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
+            smtp_password: env::var("SMTP_PASSWORD")
+                .or_else(|_| env::var("SMTP_PASS"))
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
+            mail_from: env::var("MAIL_FROM")
+                .or_else(|_| env::var("SMTP_USERNAME"))
+                .or_else(|_| env::var("SMTP_USER"))
+                .unwrap_or_else(|_| "no-reply@flowpay.xyz".into()),
+            mail_from_name: env::var("MAIL_FROM_NAME").unwrap_or_else(|_| "FlowPay".into()),
+            auth_session_ttl_hours: env::var("FLOWPAY_AUTH_SESSION_TTL_HOURS")
+                .ok()
+                .and_then(|value| value.trim().parse().ok())
+                .unwrap_or(24 * 14),
+            auth_code_ttl_minutes: env::var("FLOWPAY_AUTH_CODE_TTL_MINUTES")
+                .ok()
+                .and_then(|value| value.trim().parse().ok())
+                .unwrap_or(15),
+            dashboard_base_url: env::var("FLOWPAY_DASHBOARD_BASE_URL")
+                .unwrap_or_else(|_| "https://pixuno.xyz".into())
+                .trim_end_matches('/')
+                .to_owned(),
         })
     }
 

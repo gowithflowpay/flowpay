@@ -151,7 +151,8 @@ html,body{background:#f4f1e9;color:#14231f}.checkout-shell,.claim-shell{backgrou
 .agent-chat-msg.user{align-self:flex-end;background:#5a32e6;color:#fff;border-bottom-right-radius:4px}
 .agent-chat-msg.agent{align-self:flex-start;background:#f3effc;color:#10132d;border-bottom-left-radius:4px}
 .agent-chat-msg.system{align-self:center;background:#eaf3f1;color:#027a48;font-size:12px;text-align:center}
-.agent-chat-input{display:flex;gap:8px;padding:12px 16px;border-top:1px solid #eee;background:#fafafe}
+.agent-chat-input{display:flex;flex-wrap:wrap;gap:8px;padding:12px 16px;border-top:1px solid #eee;background:#fafafe}
+.agent-chat-input input[type=email]{flex-basis:100%}
 .agent-chat-input input{flex:1;padding:10px 14px;border:1px solid #e2dfea;border-radius:8px;font-size:13px;outline:none;background:#fff}.agent-chat-input input:focus{border-color:#5a32e6}
 .agent-chat-input button{padding:10px 18px;border:0;border-radius:8px;background:#5a32e6;color:#fff;font-weight:700;font-size:13px;cursor:pointer}.agent-chat-input button:disabled{opacity:.5;cursor:not-allowed}
 
@@ -169,6 +170,16 @@ html,body,button,input,select,textarea{font-family:"Segoe UI Variable Text","Seg
 @media(max-width:850px){.reference-checkout{display:block;max-width:600px;padding:10px 24px 70px}.reference-summary-inner{padding:24px}.reference-payment{justify-content:center}.reference-payment-inner{width:100%;padding:24px 0}.reference-qr-frame{width:260px;height:260px}.reference-footer{display:none}}
 @media(max-width:560px){.reference-checkout{padding:20px 16px 72px}.reference-summary-inner{padding:25px 20px}.reference-summary h1 strong{font-size:39px}.reference-payment-inner{padding:22px 0}.reference-qr-frame{width:210px;height:210px}.payment-status-label{margin-top:18px}}
 @keyframes agent-fade{from{opacity:0}}@keyframes agent-rise{from{opacity:0;transform:translateY(8px) scale(.98)}}
+
+/* FlowPay Agent launcher and chat panel */
+.agent-chat-fab{display:grid;right:30px;bottom:28px;width:76px;height:76px;padding:0;border:0;background:transparent;border-radius:50%;box-shadow:0 10px 34px rgba(84,44,205,.22);z-index:120}
+.agent-chat-fab img{width:100%;height:100%;object-fit:contain}.agent-chat-fab:focus-visible{outline:3px solid #7c3aed;outline-offset:4px}
+.agent-chat-fab-close{width:54px;height:54px;right:38px;bottom:38px;background:#5a32e6;color:#fff}.agent-chat-fab-close img{display:none}
+.agent-chat-panel{right:30px;bottom:118px;width:min(410px,calc(100vw - 40px));height:min(650px,calc(100vh - 150px));max-height:none;border:1px solid #e6e3ed;border-radius:18px;box-shadow:0 22px 65px rgba(40,32,90,.2)}
+.agent-chat-header{padding:14px 16px;background:#fff;color:#17182d;border-bottom:1px solid #eeeaf5}.agent-chat-header>img{width:42px;height:42px;object-fit:contain}.agent-chat-header>div{flex:1}.agent-chat-header h3{font-size:16px;color:#17182d}.agent-chat-header small{display:flex;align-items:center;gap:5px;margin-top:3px;color:#77768a;opacity:1}.agent-chat-header small i{width:7px;height:7px;border-radius:50%;background:#20c77a}.agent-chat-header>button{border:0;background:transparent;color:#77768a;font-size:27px;line-height:1;cursor:pointer}
+.agent-chat-messages{background:#fbfaff;padding:18px}.agent-chat-msg{font-size:13px;border-radius:14px}.agent-chat-msg.agent{background:#f0eef8}.agent-chat-msg.user{background:linear-gradient(135deg,#6847ec,#5a32e6)}
+.agent-chat-input{padding:13px 15px;background:#fff}.agent-chat-input input{height:44px;border-radius:10px}.agent-chat-input button{width:44px;height:44px;padding:0;border-radius:50%;font-size:0}.agent-chat-input button:after{content:'➤';font-size:17px}
+@media(max-width:560px){.agent-chat-fab{right:18px;bottom:18px;width:64px;height:64px}.agent-chat-fab-close{right:24px;bottom:24px;width:48px;height:48px}.agent-chat-panel{right:10px;bottom:92px;width:calc(100vw - 20px);height:min(620px,calc(100vh - 115px));border-radius:16px}.agent-chat-backdrop{background:rgba(16,19,45,.16)}}
 
 /* Reference-faithful hosted checkout */
 $checkout-violet:#5a32e6;$checkout-ink:#10132d;$checkout-bg:#fbfaff;
@@ -191,3 +202,61 @@ html,body,button,input,select,textarea{font-family:"Inter",ui-sans-serif,system-
 
 /* Shared FlowPay artwork across checkout, claims, loading and receipts. */
 html,body{min-height:100%;background:#f9f9ff url("/assets/checkout-background-v2.png") center/cover fixed no-repeat}.checkout-shell,.claim-shell,.claim-loading,.success-page{background:transparent!important}.claim-header,.success-header{background:rgba(249,249,255,.42);backdrop-filter:blur(14px)}.checkout-card,.claim-panel,.status-panel,.claim-success,.success-receipt{background:rgba(255,255,255,.86);backdrop-filter:blur(18px)}
+
+/* Payment exception and refund outcomes */
+.success-page{isolation:isolate}.success-header,.success-receipt,.success-powered{position:relative;z-index:1}.success-receipt{overflow:hidden;background:#fff!important}.refund-receipt .receipt-check>svg,.payment-refund-modal .payment-success-check>svg{border-color:#ffd8a8;color:#e97817}.refund-receipt .receipt-primary,.payment-refund-modal button{background:#e97817}.wrong-asset-backdrop{z-index:110}.wrong-asset-modal{width:min(470px,100%);padding:34px 31px 29px;border-radius:16px;background:#fff;text-align:center;box-shadow:0 24px 80px rgba(30,20,44,.28)}.wrong-asset-icon{width:62px;height:62px;margin:0 auto 17px;border-radius:50%;display:grid;place-items:center;background:#fff1df;color:#e97817}.wrong-asset-icon svg{width:30px}.wrong-asset-modal h2{margin:0 0 9px;font-size:25px}.wrong-asset-modal p{margin:0;color:#686d7d;font-size:13px;line-height:1.6}.wrong-asset-actions{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:25px}.wrong-asset-actions button{height:46px;border:1px solid #dedfe8;border-radius:8px;background:#fff;color:#555b6d;font-weight:700}.wrong-asset-actions button:last-child{border-color:#e97817;background:#e97817;color:#fff}@media(max-width:560px){.wrong-asset-actions{grid-template-columns:1fr}.wrong-asset-modal{padding:29px 22px 23px}}
+.reference-address-inactive{opacity:.55}.reference-address-inactive button{cursor:not-allowed;color:#9694a2}.status-recovered{border-color:#f0c48f!important;background:#fff8ef!important}
+
+/* Keep receipt actions and long identifiers inside the transaction card. */
+.receipt-primary{gap:8px;padding:0 16px;overflow:hidden}.receipt-primary svg{width:14px!important;height:14px!important;min-width:14px;max-width:14px;flex:0 0 14px}.success-receipt dd{min-width:0;word-break:break-word}.success-receipt dl>div:nth-child(3) dd{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10px}
+
+/* NGN bank-transfer checkout: compact, borderless and mobile-first. */
+.checkout-shell.bank-transfer .reference-header{border:0;background:transparent;height:84px}
+.checkout-shell.bank-transfer .checkout-store{border:0;background:rgba(255,255,255,.66);box-shadow:0 1px 2px rgba(30,25,50,.04);font-weight:600}
+.checkout-shell.bank-transfer .reference-checkout{grid-template-columns:minmax(0,1fr) 296px;gap:44px;max-width:950px;min-height:calc(100vh - 150px)}
+.checkout-shell.bank-transfer .reference-summary{border:0;background:transparent}
+.checkout-shell.bank-transfer .reference-summary-inner{width:100%;max-width:432px;padding-top:34px}
+.checkout-shell.bank-transfer .checkout-kicker{margin-bottom:12px;background:#eeecff;color:#5a32e6;font-weight:700;text-transform:uppercase;letter-spacing:.09em}
+.checkout-shell.bank-transfer .complete-title{margin:6px 0 10px;font-size:25px;font-weight:600}
+.checkout-shell.bank-transfer .reference-summary h1{margin:0 0 4px}
+.checkout-shell.bank-transfer .reference-summary h1 strong{font-size:43px}
+.checkout-shell.bank-transfer .reference-summary h1 small{font-size:19px}
+.checkout-shell.bank-transfer .ngn-amount-note{margin:0;color:#8a8899;font-size:12px}
+.checkout-shell.bank-transfer .ngn-breakdown{list-style:none;margin:16px 0 0;padding:14px 16px;border-radius:15px;background:rgba(255,255,255,.74);box-shadow:0 10px 26px rgba(56,48,105,.05)}
+.checkout-shell.bank-transfer .ngn-breakdown li{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:6px 0;color:#8a8899;font-size:12px}
+.checkout-shell.bank-transfer .ngn-breakdown li b{color:#2a2740;font-size:12.5px;font-weight:600;font-variant-numeric:tabular-nums}
+.checkout-shell.bank-transfer .ngn-breakdown-total{margin-top:6px;padding-top:10px;border-top:1px solid #eeeaf6}
+.checkout-shell.bank-transfer .ngn-breakdown-total span{color:#55536a;font-weight:600}
+.checkout-shell.bank-transfer .ngn-breakdown-total b{color:#1b1a2b;font-size:15px;font-weight:700}
+.checkout-shell.bank-transfer .ngn-account-head{justify-content:flex-start}
+.checkout-shell.bank-transfer .send-instruction{margin:18px 0 0!important;color:#6f6e80!important;font-size:12px!important}
+.checkout-shell.bank-transfer .ngn-account-card{margin-top:16px;padding:15px 16px 16px;border-radius:15px;background:#fff;box-shadow:0 14px 34px rgba(56,48,105,.07)}
+.checkout-shell.bank-transfer .ngn-account-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:11px}
+.checkout-shell.bank-transfer .ngn-account-head span{color:#8f8da0;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.1em}
+.checkout-shell.bank-transfer .ngn-account-head em{min-width:0;font-style:normal;color:#55536a;font-size:11px;font-weight:600;text-align:right}
+.checkout-shell.bank-transfer .ngn-account-number{display:flex;align-items:center;gap:12px;padding:11px 12px 11px 15px;border-radius:11px;background:#f7f6fb;background-image:none!important}
+.checkout-shell.bank-transfer .ngn-account-number strong{flex:1;min-width:0;color:#1b1a2b;font-size:22px;font-weight:650;letter-spacing:.05em;font-variant-numeric:tabular-nums}
+.checkout-shell.bank-transfer .ngn-account-number button{width:38px;height:38px;flex:none;border:0;border-radius:10px;background:#fff;color:#5a32e6;display:grid;place-items:center;box-shadow:0 1px 3px rgba(30,25,50,.1)}
+.checkout-shell.bank-transfer .ngn-account-number button svg{width:17px;height:17px}
+.checkout-shell.bank-transfer .ngn-copied{display:block;margin-top:9px;color:#5a32e6;font-size:11px;font-weight:600}
+.checkout-shell.bank-transfer .ngn-countdown{display:flex;align-items:center;gap:14px;margin-top:18px;padding:14px 15px;border-radius:15px;background:rgba(255,255,255,.74);box-shadow:0 10px 26px rgba(56,48,105,.05)}
+.checkout-shell.bank-transfer .ngn-ring{position:relative;width:72px;height:72px;flex:none;border-radius:50%;display:grid;place-items:center;transition:background .6s linear}
+.checkout-shell.bank-transfer .ngn-ring:before{content:"";position:absolute;inset:7px;border-radius:50%;background:#fff;box-shadow:0 2px 8px rgba(56,48,105,.08)}
+.checkout-shell.bank-transfer .ngn-ring span{position:relative;z-index:1;color:#231f3d;font-size:16px;font-weight:650;font-variant-numeric:tabular-nums;letter-spacing:-.01em}
+.checkout-shell.bank-transfer .ngn-countdown-copy{display:flex;flex-direction:column;gap:3px;min-width:0}
+.checkout-shell.bank-transfer .ngn-countdown-copy strong{color:#2a2740;font-size:12.5px;font-weight:600;line-height:1.35}
+.checkout-shell.bank-transfer .ngn-countdown-copy span{color:#8a8899;font-size:11px;line-height:1.4}
+.checkout-shell.bank-transfer .payment-status-label{margin-top:16px;font-weight:600}
+.checkout-shell.bank-transfer .reference-status{margin-top:7px;padding:12px 14px;background:rgba(255,255,255,.74);box-shadow:none}
+.checkout-shell.bank-transfer .reference-status p small{display:block}
+.checkout-shell.bank-transfer .reference-payment{justify-content:flex-start;background:transparent!important;border:0!important;box-shadow:none!important}
+.checkout-shell.bank-transfer .reference-payment-inner{width:100%;max-width:296px;padding-top:34px;text-align:left}
+.checkout-shell.bank-transfer .reference-payment .ngn-steps-title{display:block;margin:0 0 13px;color:#2a2740;font-size:14px;font-weight:600;letter-spacing:-.01em}
+.checkout-shell.bank-transfer .ngn-steps{list-style:none;margin:0;padding:0;display:grid;gap:9px}
+.checkout-shell.bank-transfer .ngn-steps li{display:flex;align-items:flex-start;gap:10px;padding:12px 13px;border-radius:13px;background:rgba(255,255,255,.72);color:#5b5970;font-size:12px;line-height:1.45}
+.checkout-shell.bank-transfer .ngn-steps li span{width:22px;height:22px;flex:none;border-radius:50%;background:#eeecff;color:#5a32e6;display:grid;place-items:center;font-size:11px;font-weight:700}
+.checkout-shell.bank-transfer .ngn-steps li strong{color:#2a2740;font-weight:650}
+.checkout-shell.bank-transfer .ngn-note{margin:12px 0 0;color:#8a8899;font-size:11px;line-height:1.5}
+@media(max-width:980px){.checkout-shell.bank-transfer .reference-checkout{grid-template-columns:minmax(0,1fr) 264px;gap:30px}.checkout-shell.bank-transfer .reference-payment-inner{max-width:264px}}
+@media(max-width:850px){.checkout-shell.bank-transfer .reference-checkout{display:block;max-width:560px;padding:8px 22px 64px;min-height:0}.checkout-shell.bank-transfer .reference-summary-inner{max-width:none;padding:22px 20px;background:rgba(255,255,255,.74);border-radius:20px}.checkout-shell.bank-transfer .reference-payment{margin-top:14px}.checkout-shell.bank-transfer .reference-payment-inner{max-width:none;padding:20px 18px;background:rgba(255,255,255,.74);border-radius:20px}.checkout-shell.bank-transfer .reference-footer{padding-bottom:12px}}
+@media(max-width:560px){.checkout-shell.bank-transfer .reference-header{height:68px;padding:0 16px}.checkout-shell.bank-transfer .checkout-store{padding:0 12px;font-size:11px}.checkout-shell.bank-transfer .reference-checkout{padding:6px 14px 86px}.checkout-shell.bank-transfer .reference-summary-inner{padding:20px 16px}.checkout-shell.bank-transfer .complete-title{font-size:22px}.checkout-shell.bank-transfer .reference-summary h1 strong{font-size:35px}.checkout-shell.bank-transfer .ngn-account-number strong{font-size:19px;letter-spacing:.03em}.checkout-shell.bank-transfer .ngn-countdown{gap:12px;padding:12px}.checkout-shell.bank-transfer .ngn-ring{width:62px;height:62px}.checkout-shell.bank-transfer .ngn-ring span{font-size:14px}.checkout-shell.bank-transfer .reference-payment-inner{padding:18px 16px}.checkout-shell.bank-transfer .checkout-claim-fab{bottom:16px}}

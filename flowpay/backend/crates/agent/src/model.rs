@@ -151,7 +151,7 @@ impl OpenAiResponsesClient {
                 "messages":messages,
                 "tools":tools,
                 "stream":false,
-                "options":{"temperature":0}
+                "options":{"temperature":0,"num_predict":256}
             }))
             .send()
             .await
@@ -491,10 +491,6 @@ where
                 Err(error) => tool_error("verify_wallet_signature", error, ledger),
             },
             "get_transaction" => {
-                let parsed: Result<GetTransactionArgs, _> = serde_json::from_str(&call.arguments);
-                let Ok(_args) = parsed else {
-                    return bad_args("get_transaction", ledger);
-                };
                 let Some(chain) = ledger.claimed_chain.clone() else {
                     return structured_failure(
                         "claim_facts_required",
@@ -538,10 +534,6 @@ where
                 }
             }
             "verify_counterfactual_address" => {
-                let parsed: Result<VerifyAddressArgs, _> = serde_json::from_str(&call.arguments);
-                let Ok(_args) = parsed else {
-                    return bad_args("verify_counterfactual_address", ledger);
-                };
                 let Some(chain) = ledger.tx_chain.clone() else {
                     return structured_failure(
                         "transaction_facts_required",
@@ -573,10 +565,6 @@ where
                 }
             }
             "get_asset_balance" => {
-                let parsed: Result<GetBalanceArgs, _> = serde_json::from_str(&call.arguments);
-                let Ok(_args) = parsed else {
-                    return bad_args("get_asset_balance", ledger);
-                };
                 let Some(chain) = ledger.tx_chain.clone() else {
                     return structured_failure(
                         "transaction_facts_required",

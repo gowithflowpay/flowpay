@@ -33,4 +33,9 @@ export function networkLabel(chain:unknown){
   const key=chainKey(chain);
   return ({base:"Base",bsc:"BNB Smart Chain",base_sepolia:"Base Sepolia",ethereum_sepolia:"Ethereum Sepolia",arbitrum_sepolia:"Arbitrum Sepolia",bsc_testnet:"BSC Testnet"} as Record<string,string>)[key]??key;
 }
-export function tokenAsset(symbol:string){return symbol.toUpperCase()==="USDT"?"/assets/usdt.svg":"/assets/usdc.svg";}
+export function tokenAsset(symbol:string){
+  const key=symbol.toUpperCase();
+  if(key==="USDT")return "/assets/usdt.svg";
+  if(key==="ETH"||key==="BNB"||key==="POL")return "/assets/ethereum.svg";
+  return "/assets/usdc.svg";
+}

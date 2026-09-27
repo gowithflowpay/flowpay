@@ -1,77 +1,40 @@
-import {api} from "../lib/api";
-import {moneyFromStableBalances,statusTone} from "../lib/format";
-import {AlertIcon,ArrowRightIcon,CircleCheckIcon,ClockIcon,LinkIcon,PaymentIcon,WalletIcon} from "./components/Icons";
+"use client";
 
-const terminal=new Set(["COMPLETED","FAILED","EXPIRED","CANCELLED","RECOVERED"]);
+import {useEffect,useState} from "react";
+import {BenefitArt} from "./components/BenefitArt";
+import {ProductFlow} from "./components/ProductFlow";
 
-export default async function Dashboard(){
-  let payments:any[]=[];
-  let balance="—";
-  let unavailable=false;
-  try{
-    const [overview,result]=await Promise.all([api("/v1/merchant/overview"),api("/v1/payments?limit=100")]);
-    payments=result?.data??[];
-    balance=moneyFromStableBalances(overview?.balances??[]);
-  }catch{unavailable=true}
+const Arrow=()=> <svg viewBox="0 0 18 18" aria-hidden="true"><path d="M4 9h10M10 5l4 4-4 4" fill="none" stroke="currentColor" strokeWidth="1.5"/></svg>;
 
-  const recent=payments.slice(0,5);
-  const stats=monthlyStats(payments);
+function NetworkArt({variant=0}:{variant?:number}){return <svg className={`network-art art-${variant}`} viewBox="0 0 520 210" aria-hidden="true"><g fill="none" stroke="currentColor" strokeWidth="1.2"><path d="M-8 113h64l28-26h63l28 30h73l35-46h66l32 31h147"/><path d="M12 147h91l23-20h52m79-50 32-35h64l22 24h115" strokeDasharray="4 6"/><path d="M28 71h59l20 18M407 132l27 28h75"/><circle cx="84" cy="87" r="6"/><circle cx="175" cy="117" r="7"/><circle cx="283" cy="71" r="8"/><circle cx="381" cy="102" r="9"/><rect x="103" y="136" width="75" height="31" rx="5"/><rect x="394" y="49" width="54" height="25" rx="4"/><path d="m240 90 18-11 18 11v22l-18 11-18-11zM249 94h18v15h-18zM61 80v14M54 87h14M457 122v18M448 131h18"/></g><g fill="currentColor"><circle cx="28" cy="71" r="3"/><circle cx="126" cy="127" r="3"/><circle cx="349" cy="42" r="3"/><circle cx="434" cy="160" r="3"/></g></svg>}
 
-  return <div className="dashboard-page">
-    <section className="welcome-row">
-      <div><h1>Welcome back, Acme Store <span aria-hidden="true">👋</span></h1><p>Here&apos;s what&apos;s happening with your business today.</p></div>
-      <a className="create-payment" href="/payments/new"><LinkIcon/>Create payment link</a>
-    </section>
-    {unavailable?<p className="data-notice" role="status">Live payment data is unavailable. The API on port 8080 is offline.</p>:null}
+const features=[["Easy to use","Create a payment link in seconds and let customers pay from any supported wallet."],["Reliable settlement","Verified on-chain receipts keep every payment clear, final and easy to reconcile."],["Your UI, our API","Own the customer experience with checkout links, webhooks and a compact API."],["Low engineering effort","Launch across supported chains without rebuilding payment infrastructure."],["Customer recovery","Turn payment mistakes into guided, evidence-backed recovery flows."],["No custody required","Orchestrate payment state while keeping control of settlement."]] as const;
 
-    <div className="dashboard-summary-grid">
-      <section className="balance-card">
-        <div className="balance-copy"><span>Available balance</span><strong>{balance}</strong><p><img src="/assets/usdc.svg" alt=""/>{balance==="—"?"Unable to load USDC balance":`≈ ${balance.replace("$","")} USDC`}</p></div>
-        <div className="balance-actions"><a href="/claims">Transfer funds</a><a href="/payments">View balance details</a></div>
-      </section>
-      <section className="payments-total-card">
-        <div className="payments-total-heading"><span>Total payments</span><i title="Completed payments received this month">i</i></div>
-        <button type="button">This month <span>⌄</span></button>
-        <div className="payments-total-content">
-          <div><strong>{formatMoney(stats.current)}</strong><p className={stats.change>=0?"positive":"negative"}>{stats.change>=0?"↑":"↓"} {Math.abs(stats.change).toFixed(1)}% <span>from last month</span></p></div>
-          <svg className="payments-chart" viewBox="0 0 190 100" role="img" aria-label="Payments trend">
-            <defs><linearGradient id="chartFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#6c5ce7" stopOpacity=".22"/><stop offset="1" stopColor="#6c5ce7" stopOpacity="0"/></linearGradient></defs>
-            <path className="chart-area" d="M4 88 C26 86 29 65 49 64 S72 75 89 52 S112 49 124 35 S148 35 160 13 S178 13 186 5 L186 100 L4 100 Z"/>
-            <path className="chart-line" d="M4 88 C26 86 29 65 49 64 S72 75 89 52 S112 49 124 35 S148 35 160 13 S178 13 186 5"/>
-            <circle cx="186" cy="5" r="4"/>
-          </svg>
-        </div>
-      </section>
-    </div>
+const products={
+  checkout:{label:"CHECKOUT",title:<>Crypto payments,<br/>without the guesswork</>,copy:"Create hosted payment links with a fixed asset, network and amount. FlowPay watches the chain and confirms the exact payment automatically.",items:["Multi-chain stablecoin checkout","Verified payment receipts","Real-time webhook delivery"],link:"/payments/new",action:"Create a payment",chips:[["AMOUNT","$250"],["NETWORK","Base"],["STATUS","Paid"]]},
+  webhooks:{label:"WEBHOOKS",title:<>Every payment event,<br/>delivered in real time</>,copy:"Receive signed lifecycle events from detection through confirmation and settlement, with complete delivery visibility.",items:["Signed event payloads","Automatic delivery retries","Searchable delivery logs"],link:"/webhooks",action:"View webhooks",chips:[["EVENT","payment.paid"],["DELIVERY","200 OK"],["RETRY","0"]]},
+  recovery:{label:"RECOVERY",title:<>Payment mistakes,<br/>resolved with evidence</>,copy:"FlowPay investigates wrong-chain and wrong-asset transfers, builds a deterministic recovery plan and keeps approval under your control.",items:["Verified on-chain evidence","Policy-bound recovery plans","Human approval checkpoints"],link:"/claims",action:"Explore recovery",chips:[["CLAIM","Verified"],["POLICY","Passed"],["STATUS","Recovered"]]},
+} as const;
 
-    <section className="activity-card">
-      <header><h2>Recent activity</h2><a href="/payments">View all <ArrowRightIcon/></a></header>
-      <div className="activity-tabs"><b>Recent transfers</b><a href="/payments">Recent payments</a></div>
-      <div className="activity-table"><div className="activity-head"><span>Type</span><span>Description</span><span>Status</span><span>Date</span><span>Amount</span></div>
-        {recent.map((p:any)=>{const status=String(p.status??"WAITING");return <a className="activity-row" href={`/payments/${p.id}`} key={p.id}><span className="activity-icon">{terminal.has(status)?<PaymentIcon/>:<WalletIcon/>}</span><strong>{p.reference||`${p.asset} payment`}</strong><span className={`activity-status ${statusTone(status)}`}>{statusIcon(status)}{humanize(status)}</span><time>{formatDate(p.updated_at??p.created_at)}</time><b>{p.amount} {p.asset}</b></a>})}
-        {recent.length===0?<div className="activity-empty">{unavailable?"Transfers will appear when the FlowPay API is running.":"No payment activity yet."}</div>:null}
-      </div>
-      <a className="activity-footer" href="/payments">View all activity <ArrowRightIcon/></a>
-    </section>
-  </div>
-}
-
-function humanize(v:string){return v.replaceAll("_"," ").toLowerCase().replace(/(^|\s)\S/g,x=>x.toUpperCase())}
-function statusIcon(status:string){if(["COMPLETED","RECOVERED","CONFIRMED"].includes(status))return <CircleCheckIcon/>;if(["EXPIRED","FAILED","CANCELLED"].includes(status))return <AlertIcon/>;return <ClockIcon/>}
-function formatDate(v:any){if(!v)return "—";const d=new Date(v);if(Number.isNaN(d.getTime()))return "—";return <>{new Intl.DateTimeFormat("en-US",{month:"short",day:"numeric",year:"numeric"}).format(d)}<small>{new Intl.DateTimeFormat("en-US",{hour:"numeric",minute:"2-digit"}).format(d)}</small></>}
-function formatMoney(amount:number){return new Intl.NumberFormat("en-US",{style:"currency",currency:"USD",minimumFractionDigits:2}).format(amount)}
-function monthlyStats(payments:any[]){
-  const now=new Date();
-  const currentStart=new Date(now.getFullYear(),now.getMonth(),1).getTime();
-  const previousStart=new Date(now.getFullYear(),now.getMonth()-1,1).getTime();
-  let current=0,previous=0;
-  for(const payment of payments){
-    if(!["COMPLETED","RECOVERED","CONFIRMED"].includes(String(payment.status??"")))continue;
-    const when=new Date(payment.updated_at??payment.created_at??0).getTime();
-    const amount=Number(payment.amount??0);
-    if(!Number.isFinite(when)||!Number.isFinite(amount))continue;
-    if(when>=currentStart)current+=amount;else if(when>=previousStart)previous+=amount;
-  }
-  const change=previous>0?((current-previous)/previous)*100:current>0?100:0;
-  return {current,change};
-}
+export default function LandingPage(){
+  const [active,setActive]=useState<keyof typeof products>("checkout");
+  const product=products[active];
+  useEffect(()=>{
+    const nodes=[...document.querySelectorAll<HTMLElement>(".fp-landing main>section:not(.landing-hero), .fp-landing .feature-card")];
+    nodes.forEach(node=>node.classList.add("reveal"));
+    const observer=new IntersectionObserver(entries=>entries.forEach(entry=>{if(entry.isIntersecting){entry.target.classList.add("revealed");observer.unobserve(entry.target)}}),{threshold:.14});
+    nodes.forEach(node=>observer.observe(node));
+    const onScroll=()=>document.documentElement.style.setProperty("--landing-scroll",`${window.scrollY*.045}px`);
+    window.addEventListener("scroll",onScroll,{passive:true});
+    return()=>{observer.disconnect();window.removeEventListener("scroll",onScroll)};
+  },[]);
+  return <div className="fp-landing">
+  <header className="landing-nav"><a className="landing-brand" href="#top"><img src="/assets/flowpay-mark.svg" alt=""/>FlowPay</a><nav aria-label="Primary navigation"><a href="#product">Product</a><a href="#why">Why FlowPay</a><a href="#developers">Developers</a></nav><div className="landing-nav-actions"><a className="text-link" href="/login">Sign in</a><a className="coral-button small" href="/signup">Get started <Arrow/></a></div></header>
+  <main id="top">
+    <section className="landing-hero landing-hero-video"><div className="hero-background"><video className="hero-background-video" autoPlay muted loop playsInline preload="auto" aria-hidden="true"><source src="/assets/merchant-background.mp4" type="video/mp4"/></video></div><div className="hero-copy"><h1>Integrate crypto rails<br/> into your platform</h1><p>Accept crypto payments and settle to your wallet. One integration, built into your product.</p><div className="hero-actions"><a className="coral-button" href="/signup">Get started <Arrow/></a><a className="outline-button" href="#developers"><span className="play-dot">▶</span> See how it works</a></div></div></section>
+    <section className="feature-section" id="why"><div className="section-heading"><span className="section-tag">OUR BENEFITS</span><h2>Why FlowPay just works</h2></div><div className="feature-grid">{features.map(([title,copy],index)=><article className="feature-card" key={title}><BenefitArt index={index+1}/><div><h3>{title}</h3><p>{copy}</p></div></article>)}</div></section>
+    <section className="products" id="product"><div className="section-heading"><span className="section-tag">PRODUCT SUITE</span><h2>Meet our products</h2><p>From checkout to recovery, FlowPay gives platforms one connected payment layer.</p></div><div className="product-tabs" role="tablist" aria-label="FlowPay products">{(Object.keys(products) as Array<keyof typeof products>).map(key=><button type="button" role="tab" id={`product-tab-${key}`} aria-controls="product-panel" tabIndex={active===key?0:-1} onKeyDown={event=>{const keys=Object.keys(products) as Array<keyof typeof products>;const i=keys.indexOf(key);const target=event.key==="ArrowRight"?keys[(i+1)%keys.length]:event.key==="ArrowLeft"?keys[(i+keys.length-1)%keys.length]:event.key==="Home"?keys[0]:event.key==="End"?keys[keys.length-1]:null;if(target){event.preventDefault();setActive(target);document.getElementById(`product-tab-${target}`)?.focus();}}} aria-selected={active===key} className={active===key?"active":""} onClick={()=>setActive(key)} key={key}>{products[key].label}</button>)}</div><div id="product-panel" role="tabpanel" aria-labelledby={`product-tab-${active}`} className={`product-showcase product-${active}`} key={active}><ProductFlow kind={active}/><div className="product-copy"><span className="section-tag dark">{product.label}</span><h3>{product.title}</h3><p>{product.copy}</p><ul>{product.items.map(item=><li key={item}>{item}</li>)}</ul><a href={product.link}>{product.action} <Arrow/></a></div></div></section>
+    <section className="developer-cta developer-build" id="developers"><div className="developer-build-copy"><h2>Build with FlowPay</h2><p>Start integrating crypto payments into your platform with FlowPay's API.</p><div className="hero-actions"><a className="coral-button" href="/developers">Let's build <Arrow/></a><a className="outline-button light" href="mailto:support@flowpay.dev">Get in touch</a></div></div><img className="developer-build-art" src="/assets/build-with-flowpay.svg" alt="" loading="lazy"/></section>
+  </main>
+  <footer className="landing-footer"><div><a className="landing-brand" href="#top"><img src="/assets/flowpay-mark.svg" alt=""/>FlowPay</a><h2>Stablecoin payments<br/>built for real products.</h2></div><div><strong>PRODUCT</strong><a href="/payments/new">Payment links</a><a href="/payments">Transactions</a><a href="/claims">Recovery</a></div><div><strong>DEVELOPERS</strong><a href="/developers">API keys</a><a href="/webhooks">Webhooks</a><a href="mailto:support@flowpay.dev">Support</a></div><div><strong>COMPANY</strong><a href="#why">About</a><a href="#developers">Contact</a><a href="#top">Security</a></div><small>© 2026 FlowPay. Payments move at internet speed.</small></footer>
+</div>}

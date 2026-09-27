@@ -118,7 +118,7 @@ impl RecoveryPolicy {
                 required_approval: false,
             };
         }
-        if approval_risk {
+        if approval_risk && self.require_human_approval {
             return RecoveryPolicyResult {
                 decision: RecoveryPolicyDecision::Allowed,
                 reasons: vec!["approval_required_for_claim_exception".to_owned()],
@@ -128,7 +128,11 @@ impl RecoveryPolicy {
 
         RecoveryPolicyResult {
             decision: RecoveryPolicyDecision::Allowed,
-            reasons: vec!["policy_checks_passed".to_owned()],
+            reasons: vec![if approval_risk {
+                "claim_exception_allowed_by_automatic_policy".to_owned()
+            } else {
+                "policy_checks_passed".to_owned()
+            }],
             required_approval: self.require_human_approval,
         }
     }
@@ -194,6 +198,29 @@ mod tests {
         });
         assert_eq!(result.decision, RecoveryPolicyDecision::Allowed);
         assert!(result.required_approval);
+    }
+
+    #[test]
+    fn automatic_policy_allows_cross_chain_exception_without_approval() {
+        let mut automatic = policy();
+        automatic.require_human_approval = false;
+        let result = automatic.evaluate(&RecoveryPolicyInput {
+            source_chain: ChainKey::Bsc,
+            asset_symbol: "USDT".to_owned(),
+            token_contract: Some("0xtest".to_owned()),
+            amount: amount("50000000"),
+            ownership_verified: true,
+            factory_verified: true,
+            funds_present: true,
+            gas_sufficient: true,
+            risk_flags: vec![RiskFlag::CrossChain, RiskFlag::AmountMismatch],
+        });
+        assert_eq!(result.decision, RecoveryPolicyDecision::Allowed);
+        assert!(!result.required_approval);
+        assert_eq!(
+            result.reasons,
+            vec!["claim_exception_allowed_by_automatic_policy"]
+        );
     }
 
     #[test]

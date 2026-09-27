@@ -18,6 +18,8 @@ const nextConfig = {
       {source:"/claim/:path*",destination:`${checkoutBase}/claim/:path*`},
       {source:"/api/payment/:path*",destination:`${checkoutBase}/api/payment/:path*`},
       {source:"/api/claims/:path*",destination:`${checkoutBase}/api/claims/:path*`},
+      {source:"/assets/glossy-neon-robot-assistant-icon.png",destination:`${checkoutBase}/assets/glossy-neon-robot-assistant-icon.png`},
+      {source:"/assets/recovery-bot.svg",destination:`${checkoutBase}/assets/recovery-bot.svg`},
     ];
   },
 };

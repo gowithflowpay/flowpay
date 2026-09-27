@@ -28,6 +28,8 @@ rust-version = "1.88"
 [workspace.dependencies]
 aes-gcm = "0.10"
 rand = "0.8"
+argon2 = "0.5"
+lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "tokio1-rustls-tls", "hostname"] }
 url = "2"
 alloy-primitives = { version = "1", features = ["serde"] }
 anyhow = "1"
