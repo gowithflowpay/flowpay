@@ -10,12 +10,12 @@ The production workspace is in [`flowpay/`](flowpay/README.md).
 - `flowpay/contracts` - Solidity checkout and recovery contracts
 - `flowpay/apps/merchant` - merchant dashboard, payment history, API keys, and payment-link creation
 - `flowpay/apps/checkout` - hosted crypto checkout and customer recovery experience
-- `flowpay/apps/mcp` - credential-safe MCP installer for ChatGPT, Codex, Claude, and other AI agents
+- `flowpay/apps/mcp` - credential-safe local and hosted MCP for ChatGPT, Codex, Claude, and other AI agents
 - `flowpay/sdk` - client integration code
 
 ## AI integration
 
-The FlowPay MCP can inspect a Next.js site, create the server-side crypto payment route, add a checkout component, store the FlowPay credential directly in `.env.local`, and verify the integration. The API key stays inside the MCP process and is never returned to the model.
+The FlowPay MCP can generate a server-side Next.js crypto payment route and checkout component, verify credentials, create hosted crypto payments, and read payment history. The hosted service uses Streamable HTTP; the local installer can write the integration directly into a project. API keys stay in connector or deployment secret storage and are never returned to the model.
 
 See [`flowpay/apps/mcp/README.md`](flowpay/apps/mcp/README.md) for setup.
 
