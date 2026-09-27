@@ -1,6 +1,23 @@
 # FlowPay MCP
 
-This MCP installs a server-side FlowPay crypto checkout into a Next.js site. The model can inspect, install, and verify the integration without receiving the FlowPay API key.
+FlowPay MCP supports both a local installer and a hosted Streamable HTTP service. It installs a server-side, crypto-only FlowPay checkout without returning the FlowPay API key to the model.
+
+## Hosted MCP
+
+Connect an MCP-compatible client to `https://mcp.pixuno.xyz/mcp` and store a live FlowPay API key as the connector's Bearer token. The credential is validated against FlowPay before MCP initialization and is never included in tool output.
+
+Available hosted tools:
+
+- `flowpay_integration_guide`
+- `flowpay_generate_nextjs_integration`
+- `flowpay_verify_credentials`
+- `flowpay_list_payments`
+- `flowpay_get_payment`
+- `flowpay_create_payment`
+
+The generated browser component calls a server-only route. Only that route reads `FLOWPAY_API_KEY` from the deployment secret manager.
+
+## Local installer
 
 ```json
 {

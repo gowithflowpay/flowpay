@@ -1,0 +1,15 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "rewrites": [
+    {"source": "/", "destination": "/api/index"},
+    {"source": "/health", "destination": "/api/health"},
+    {"source": "/mcp", "destination": "/api/mcp"}
+  ],
+  "headers": [
+    {"source": "/(.*)", "headers": [
+      {"key": "X-Content-Type-Options", "value": "nosniff"},
+      {"key": "Referrer-Policy", "value": "no-referrer"},
+      {"key": "Strict-Transport-Security", "value": "max-age=63072000; includeSubDomains; preload"}
+    ]}
+  ]
+}
