@@ -1,0 +1,28 @@
+import type {SVGProps} from "react";
+
+type Props=SVGProps<SVGSVGElement>;
+const Svg=({children,...props}:Props)=><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" {...props}>{children}</svg>;
+export const StoreIcon=(p:Props)=><Svg {...p}><path d="M4 10v9h16v-9M3 5h18l-1 5a3 3 0 0 1-5 1 3 3 0 0 1-6 0 3 3 0 0 1-5 0L3 5Z"/><path d="M9 19v-5h6v5"/></Svg>;
+export const CopyIcon=(p:Props)=><Svg {...p}><rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/></Svg>;
+export const InfoIcon=(p:Props)=><Svg {...p}><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></Svg>;
+export const ClockIcon=(p:Props)=><Svg {...p}><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></Svg>;
+export const LifebuoyIcon=(p:Props)=><Svg {...p}><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/><path d="m6.4 6.4 3.5 3.5m4.2 4.2 3.5 3.5m0-11.2-3.5 3.5m-4.2 4.2-3.5 3.5"/></Svg>;
+export const HeadphonesIcon=(p:Props)=><Svg {...p}><path d="M4 14v-2a8 8 0 0 1 16 0v2"/><path d="M4 14h3v5H5a1 1 0 0 1-1-1v-4Zm16 0h-3v5h2a1 1 0 0 0 1-1v-4Z"/></Svg>;
+export const ArrowRightIcon=(p:Props)=><Svg {...p}><path d="M5 12h14m-5-5 5 5-5 5"/></Svg>;
+export const ArrowLeftIcon=(p:Props)=><Svg {...p}><path d="M19 12H5m5 5-5-5 5-5"/></Svg>;
+export const ShieldIcon=(p:Props)=><Svg {...p}><path d="M12 3 5 6v5c0 4.5 2.8 8 7 10 4.2-2 7-5.5 7-10V6l-7-3Z"/><path d="m9 12 2 2 4-4"/></Svg>;
+export const LockIcon=(p:Props)=><Svg {...p}><rect x="5" y="10" width="14" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></Svg>;
+export const CheckIcon=(p:Props)=><Svg {...p}><path d="m5 12 4 4 10-10"/></Svg>;
+export const WalletIcon=(p:Props)=><Svg {...p}><path d="M4 7.5h14a2 2 0 0 1 2 2V19H5a2 2 0 0 1-2-2V7a3 3 0 0 1 3-3h11v3.5"/><path d="M16 12h4v4h-4a2 2 0 0 1 0-4Z"/></Svg>;
+export const FileIcon=(p:Props)=><Svg {...p}><path d="M6 3h8l4 4v14H6V3Z"/><path d="M14 3v5h5M9 13h6M9 17h4"/></Svg>;
+export const SparklesIcon=(p:Props)=><Svg {...p}><path d="m12 3 1.4 4.1L17 9l-3.6 1.9L12 15l-1.4-4.1L7 9l3.6-1.9L12 3Z"/><path d="m19 14 .8 2.2L22 17l-2.2.8L19 20l-.8-2.2L16 17l2.2-.8L19 14ZM5 15l.8 2.2L8 18l-2.2.8L5 21l-.8-2.2L2 18l2.2-.8L5 15Z"/></Svg>;
+export const UploadIcon=(p:Props)=><Svg {...p}><path d="M12 16V5m-4 4 4-4 4 4"/><path d="M5 14v5h14v-5"/></Svg>;
+export const ExternalIcon=(p:Props)=><Svg {...p}><path d="M14 4h6v6M20 4l-9 9"/><path d="M19 14v5H5V5h5"/></Svg>;
+export const CalendarIcon=(p:Props)=><Svg {...p}><rect x="4" y="5" width="16" height="15" rx="2"/><path d="M8 3v4m8-4v4M4 10h16"/></Svg>;
+export const EditIcon=(p:Props)=><Svg {...p}><path d="m4 20 4.5-1 10-10a2.1 2.1 0 0 0-3-3l-10 10L4 20Z"/><path d="m14 7 3 3"/></Svg>;
+export const MoreIcon=(p:Props)=><Svg {...p}><circle cx="5" cy="12" r="1" fill="currentColor"/><circle cx="12" cy="12" r="1" fill="currentColor"/><circle cx="19" cy="12" r="1" fill="currentColor"/></Svg>;
+export const CoinsIcon=(p:Props)=><Svg {...p}><circle cx="9" cy="9" r="5"/><path d="M13 7a5 5 0 1 1-4 8M7 9h4M9 7v4"/></Svg>;
+export const NetworkIcon=(p:Props)=><Svg {...p}><circle cx="6" cy="7" r="2"/><circle cx="18" cy="7" r="2"/><circle cx="12" cy="17" r="2"/><path d="m7.7 8.2 3.1 6.5m5.5-6.5-3.1 6.5M8 7h8"/></Svg>;
+export const ReceiptIcon=(p:Props)=><Svg {...p}><path d="M6 3h12v18l-3-2-3 2-3-2-3 2V3Z"/><path d="M9 8h6M9 12h6M9 16h3"/></Svg>;
+export const AmountIcon=(p:Props)=><Svg {...p}><circle cx="12" cy="12" r="9"/><path d="M15 9.5c-.5-1-1.4-1.5-3-1.5-1.7 0-3 .8-3 2s1 1.7 3 2c2 .3 3 1 3 2s-1.3 2-3 2c-1.6 0-2.6-.5-3.2-1.5M12 6v12"/></Svg>;
+export const QuestionIcon=(p:Props)=><Svg {...p}><circle cx="12" cy="12" r="9"/><path d="M9.8 9a2.4 2.4 0 1 1 3.7 2c-1 .7-1.5 1.2-1.5 2.5M12 17h.01"/></Svg>;

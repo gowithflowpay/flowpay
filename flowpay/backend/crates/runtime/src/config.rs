@@ -87,6 +87,36 @@ impl Config {
             add_chain(&mut chains, ChainKey::Bsc, "BSC", 31338, &factory)?;
         }
         if !is_local {
+            add_chain(&mut chains, ChainKey::Base, "BASE", 8453, &factory)?;
+            add_chain(&mut chains, ChainKey::Bsc, "BSC", 56, &factory)?;
+            add_chain(
+                &mut chains,
+                ChainKey::Custom("ethereum".into()),
+                "ETHEREUM",
+                1,
+                &factory,
+            )?;
+            add_chain(
+                &mut chains,
+                ChainKey::Custom("arbitrum".into()),
+                "ARBITRUM",
+                42161,
+                &factory,
+            )?;
+            add_chain(
+                &mut chains,
+                ChainKey::Custom("optimism".into()),
+                "OPTIMISM",
+                10,
+                &factory,
+            )?;
+            add_chain(
+                &mut chains,
+                ChainKey::Custom("polygon".into()),
+                "POLYGON",
+                137,
+                &factory,
+            )?;
             add_chain(
                 &mut chains,
                 ChainKey::Custom("bsc_testnet".into()),
@@ -361,6 +391,12 @@ fn parse_hex32(key: &str) -> anyhow::Result<[u8; 32]> {
 
 fn parse_alchemy_webhook_ids() -> HashMap<ChainKey, String> {
     [
+        ("ALCHEMY_BASE_WEBHOOK_ID", "base"),
+        ("ALCHEMY_ETHEREUM_WEBHOOK_ID", "ethereum"),
+        ("ALCHEMY_ARBITRUM_WEBHOOK_ID", "arbitrum"),
+        ("ALCHEMY_OPTIMISM_WEBHOOK_ID", "optimism"),
+        ("ALCHEMY_POLYGON_WEBHOOK_ID", "polygon"),
+        ("ALCHEMY_BSC_WEBHOOK_ID", "bsc"),
         ("ALCHEMY_BSC_TESTNET_WEBHOOK_ID", "bsc_testnet"),
         ("ALCHEMY_ETHEREUM_SEPOLIA_WEBHOOK_ID", "ethereum_sepolia"),
         ("ALCHEMY_BASE_SEPOLIA_WEBHOOK_ID", "base_sepolia"),
@@ -373,7 +409,7 @@ fn parse_alchemy_webhook_ids() -> HashMap<ChainKey, String> {
         env::var(environment_key)
             .ok()
             .filter(|value| !value.trim().is_empty())
-            .map(|value| (ChainKey::Custom(chain.into()), value))
+            .and_then(|value| ChainKey::from_str(chain).ok().map(|key| (key, value)))
     })
     .collect()
 }

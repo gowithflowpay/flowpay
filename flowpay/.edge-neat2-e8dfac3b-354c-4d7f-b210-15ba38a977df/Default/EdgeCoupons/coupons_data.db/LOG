@@ -1,0 +1,5 @@
+2026/09/15-14:01:17.366 5e34 Creating DB C:\Users\Tolul\Desktop\FlowPay\flowpay\.edge-neat2-e8dfac3b-354c-4d7f-b210-15ba38a977df\Default\EdgeCoupons/coupons_data.db since it was missing.
+2026/09/15-14:01:17.387 5e34 Reusing MANIFEST C:\Users\Tolul\Desktop\FlowPay\flowpay\.edge-neat2-e8dfac3b-354c-4d7f-b210-15ba38a977df\Default\EdgeCoupons/coupons_data.db/MANIFEST-000001
+2026/09/15-14:01:27.354 5b24 Level-0 table #5: started
+2026/09/15-14:01:27.366 5b24 Level-0 table #5: 683284 bytes OK
+2026/09/15-14:01:27.370 5b24 Delete type=0 #3

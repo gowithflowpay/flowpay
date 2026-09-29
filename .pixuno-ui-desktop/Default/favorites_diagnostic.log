@@ -1,0 +1,18 @@
+2026-09-29 07:05:06.963: [INFO] CurrentProfilePath: C:\Users\Tolul\Desktop\FlowPay\.pixuno-ui-desktop\Default
+2026-09-29 07:05:06.963: [INFO] Profiles total count: 1
+2026-09-29 07:05:06.963: [INFO] Profile: name=Profile 1 path=C:\Users\Tolul\Desktop\FlowPay\.pixuno-ui-desktop\Default lastActive=2026-09-29T07:05:06.936Z
+2026-09-29 07:05:06.963: [INFO] LastUsedProfileDir: C:\Users\Tolul\Desktop\FlowPay\.pixuno-ui-desktop\Default
+2026-09-29 07:05:06.963: [INFO] MostRecentlyActiveProfile: name=Profile 1 path=C:\Users\Tolul\Desktop\FlowPay\.pixuno-ui-desktop\Default lastActive=2026-09-29T07:05:06.936Z
+2026-09-29 07:05:06.963: [INFO] OnDoneLoading sync enabled: 0
+2026-09-29 07:05:06.963: [INFO] BookmarkModelLoaded, ids_reassigned: 0
+2026-09-29 07:05:06.963: [INFO] BookmarksLoadDropped droppedNodes=0
+2026-09-29 07:05:06.963: [INFO] BookmarksSnapshot Startup total=0 bar=0 other=0 mobile=0 showBar=0 showBarNTP=1
+2026-09-29 07:05:06.966: [INFO] RecordSyncInitDuration has_sync_been_enabled: 0 state: 0
+2026-09-29 07:05:07.327: [INFO] VisibilityChanged: 0
+2026-09-29 07:05:08.102: [INFO] RecordSyncInitDuration has_sync_been_enabled: 0 state: 0
+2026-09-29 07:05:08.107: [INFO] RecordSyncInitDuration has_sync_been_enabled: 0 state: 3
+2026-09-29 07:05:08.110: [INFO] Primary account changed.
+2026-09-29 07:05:08.110: [INFO] OnPrimaryAccountChanged PrimaryAccountChangeEvent::Type::kSet
+2026-09-29 07:05:08.124: [INFO] RecordSyncInitDuration has_sync_been_enabled: 0 state: 3
+2026-09-29 07:05:08.144: [INFO] RecordSyncInitDuration has_sync_been_enabled: 0 state: 3
+2026-09-29 07:05:13.743: [INFO] BookmarksSnapshot Shutdown total=0 bar=0 other=0 mobile=0 showBar=0 showBarNTP=1

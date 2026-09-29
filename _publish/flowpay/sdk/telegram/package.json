@@ -1,0 +1,9 @@
+{
+  "name":"@flowpay/telegram-example",
+  "version":"0.2.0",
+  "private":true,
+  "type":"module",
+  "scripts":{"build":"tsc -p tsconfig.json","start":"node dist/bot.js"},
+  "dependencies":{"@flowpay/node":"file:../node"},
+  "devDependencies":{"typescript":"^5.8.3"}
+}

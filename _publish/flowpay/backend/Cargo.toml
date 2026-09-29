@@ -1,0 +1,95 @@
+[workspace]
+resolver = "2"
+members = [
+  "apps/api-server",
+  "apps/worker",
+  "apps/event-relay",
+  "crates/runtime",
+  "crates/domain",
+  "crates/chains",
+  "crates/evm",
+  "crates/payments",
+  "crates/claims",
+  "crates/recovery",
+  "crates/agent",
+  "crates/policy",
+  "crates/signer",
+  "crates/webhooks",
+  "crates/persistence",
+  "crates/messaging",
+]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.88"
+
+[workspace.dependencies]
+aes-gcm = "0.10"
+rand = "0.8"
+url = "2"
+alloy-primitives = { version = "1", features = ["serde"] }
+anyhow = "1"
+async-trait = "0.1"
+axum = "0.8"
+base64 = "0.22"
+clap = { version = "4", features = ["derive"] }
+hex = "0.4"
+hmac = "0.12"
+k256 = { version = "0.13", features = ["ecdsa"] }
+ethers-core = "2"
+ethers-signers = "2"
+num-bigint = { version = "0.4", features = ["serde"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+sha3 = "0.10"
+subtle = "2"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "uuid", "time", "json", "bigdecimal"] }
+thiserror = "2"
+time = { version = "0.3", features = ["serde", "formatting", "parsing", "macros"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time", "sync"] }
+tower-http = { version = "0.6", features = ["cors", "request-id", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+uuid = { version = "1", features = ["serde", "v7"] }
+lapin = { version = "2.5", features = ["rustls"] }
+rdkafka = { version = "0.37", features = ["cmake-build"] }
+futures-util = "0.3"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# Clippy 1.98 diagnoses the intentionally explicit state-machine match arms;
+# keep strict linting without requiring mechanically nested patterns.
+unnested_or_patterns = "allow"
+missing_errors_doc = "allow"
+manual_repeat_n = "allow"
+lint_groups_priority = "allow"
+needless_raw_string_hashes = "allow"
+needless_pass_by_value = "allow"
+too_many_lines = "allow"
+struct_excessive_bools = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+wildcard_imports = "allow"
+too_many_arguments = "allow"
+manual_let_else = "allow"
+single_match_else = "allow"
+unused_self = "allow"
+items_after_test_module = "allow"
+unreadable_literal = "allow"
+semicolon_if_nothing_returned = "allow"
+case_sensitive_file_extension_comparisons = "allow"
+needless_question_mark = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_possible_wrap = "allow"
+collapsible_if = "allow"
+assigning_clones = "allow"
+match_same_arms = "allow"

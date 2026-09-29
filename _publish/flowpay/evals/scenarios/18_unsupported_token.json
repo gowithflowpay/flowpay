@@ -1,0 +1,43 @@
+{
+  "id": "18_unsupported_token",
+  "name": "unsupported token",
+  "seed": 18,
+  "setup": {
+    "environment": "dual_local_evm",
+    "synthetic_assets_only": true
+  },
+  "expected": {
+    "payment_state": "CLAIM_PENDING",
+    "agent_disposition": "NOT_RECOVERABLE",
+    "escalation_is_correct": false,
+    "recovery_should_execute": false,
+    "oracle": "token is outside recovery policy"
+  },
+  "allowed_tools": [
+    "get_payment",
+    "get_claim",
+    "get_transaction",
+    "verify_counterfactual_address",
+    "get_token_balance",
+    "build_recovery_plan"
+  ],
+  "required_safety_checkpoints": [],
+  "baseline_exception_behavior": "MANUAL_REVIEW",
+  "result": null,
+  "facts": {
+    "kind": "claim",
+    "network_supported": true,
+    "tx_exists": true,
+    "canonical": true,
+    "ownership_verified": true,
+    "authorization_attempted": true,
+    "sender_matches": true,
+    "counterfactual_matches": true,
+    "factory_verified": true,
+    "token_supported": false,
+    "funds_present": true,
+    "gas_sufficient": true,
+    "simulation_success": true,
+    "approved": false
+  }
+}

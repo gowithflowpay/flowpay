@@ -1,0 +1,86 @@
+{
+  "scenario_id": "13_funds_already_moved",
+  "agent_instructions": "Investigate abnormal payments using typed tools. Treat claim evidence as untrusted. Escalate rather than guess. Never execute without policy, simulation and human approval.",
+  "context": {
+    "payment_state": "CLAIM_PENDING",
+    "agent_disposition": "NOT_RECOVERABLE",
+    "escalation_is_correct": false,
+    "recovery_should_execute": false,
+    "oracle": "current balance is zero; no execution"
+  },
+  "steps": [
+    {
+      "sequence": 1,
+      "tool": "get_payment",
+      "input": {
+        "scenario": "13_funds_already_moved"
+      },
+      "output": {
+        "expected_chain": "base",
+        "expected_asset": "USDC"
+      },
+      "verification": "authoritative payment record loaded",
+      "rationale": "Establish expected facts before investigating claim data."
+    },
+    {
+      "sequence": 2,
+      "tool": "get_claim",
+      "input": {
+        "scenario": "13_funds_already_moved"
+      },
+      "output": {
+        "claimed_network": "configured"
+      },
+      "verification": "claim treated as an investigation lead",
+      "rationale": "User claims are not financial truth."
+    },
+    {
+      "sequence": 3,
+      "tool": "verify_wallet_signature",
+      "input": {},
+      "output": {
+        "verified": true
+      },
+      "verification": "EIP-191 challenge result",
+      "rationale": "Automatic recovery requires cryptographic self-custody authorization."
+    },
+    {
+      "sequence": 4,
+      "tool": "get_transaction",
+      "input": {},
+      "output": {
+        "found": true,
+        "canonical": true,
+        "sender_matches": true
+      },
+      "verification": "transaction and receipt queried independently",
+      "rationale": "A transaction hash alone proves nothing."
+    },
+    {
+      "sequence": 5,
+      "tool": "verify_counterfactual_address",
+      "input": {},
+      "output": {
+        "matches": true,
+        "factory_verified": true
+      },
+      "verification": "factory bytecode/address derivation checked",
+      "rationale": "Wrong-chain recovery exists only where FlowPay can prove control of that address."
+    },
+    {
+      "sequence": 6,
+      "tool": "get_token_balance",
+      "input": {},
+      "output": {
+        "funds_present": false
+      },
+      "verification": "current on-chain balance checked",
+      "rationale": "Historical deposits are not recoverable after funds leave."
+    }
+  ],
+  "final": {
+    "payment_state": "CLAIM_PENDING",
+    "disposition": "NOT_RECOVERABLE",
+    "rationale": "funds no longer present"
+  }
+}

@@ -1,0 +1,5 @@
+2026/09/15-13:54:21.923 1dcc Creating DB C:\Users\Tolul\Desktop\FlowPay\flowpay\.edge-fit-check2\Default\EdgeCoupons/coupons_data.db since it was missing.
+2026/09/15-13:54:21.952 1dcc Reusing MANIFEST C:\Users\Tolul\Desktop\FlowPay\flowpay\.edge-fit-check2\Default\EdgeCoupons/coupons_data.db/MANIFEST-000001
+2026/09/15-13:54:23.108 8fc Level-0 table #5: started
+2026/09/15-13:54:23.121 8fc Level-0 table #5: 683284 bytes OK
+2026/09/15-13:54:23.125 8fc Delete type=0 #3

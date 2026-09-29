@@ -52,6 +52,23 @@ pub struct SettlementSignerRequest {
     pub expected_factory: String,
     pub settlement_destination: String,
     pub configured_merchant_destination: String,
+    pub settlement_intent: SettlementIntent,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SettlementIntent {
+    pub chain: ChainKey,
+    pub salt: [u8; 32],
+    pub token: Option<String>,
+    pub destination: String,
+    pub amount: AtomicAmount,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PreparedSubmission {
+    pub tx_hash: String,
+    pub raw_transaction: String,
+    pub nonce: String,
 }
 
 #[derive(Debug, Error)]
@@ -157,6 +174,58 @@ fn validate_recovery_calldata(
     Ok(())
 }
 
+fn validate_settlement_calldata(
+    request: &SettlementSignerRequest,
+    intent: &SettlementIntent,
+) -> Result<(), SignerError> {
+    if request.transaction.chain != intent.chain {
+        return Err(SignerError::CalldataMismatch);
+    }
+    let data = hex::decode(request.transaction.calldata_hex.trim_start_matches("0x"))
+        .map_err(|_| SignerError::CalldataMismatch)?;
+    let erc20 = request.transaction_class == TransactionClass::SettleErc20;
+    let expected_selector = if erc20 {
+        &keccak256("recoverToken(bytes32,address,address,uint256)".as_bytes())[..4]
+    } else {
+        &keccak256("recoverNative(bytes32,address,uint256)".as_bytes())[..4]
+    };
+    let expected_len = 4 + 32 * if erc20 { 4 } else { 3 };
+    if data.len() != expected_len || data.get(..4) != Some(expected_selector) {
+        return Err(SignerError::CalldataMismatch);
+    }
+    if decode_word(&data, 0) != Some(intent.salt.as_slice()) {
+        return Err(SignerError::CalldataMismatch);
+    }
+    let (destination_index, amount_index) = if erc20 { (2, 3) } else { (1, 2) };
+    if erc20 {
+        let token = decode_address(decode_word(&data, 1).ok_or(SignerError::CalldataMismatch)?)
+            .ok_or(SignerError::CalldataMismatch)?;
+        if !intent
+            .token
+            .as_deref()
+            .is_some_and(|expected| token.eq_ignore_ascii_case(expected))
+        {
+            return Err(SignerError::CalldataMismatch);
+        }
+    } else if intent.token.is_some() {
+        return Err(SignerError::CalldataMismatch);
+    }
+    let destination = decode_address(
+        decode_word(&data, destination_index).ok_or(SignerError::CalldataMismatch)?,
+    )
+    .ok_or(SignerError::CalldataMismatch)?;
+    let amount = decode_amount(
+        decode_word(&data, amount_index).ok_or(SignerError::CalldataMismatch)?,
+    )?;
+    if !destination.eq_ignore_ascii_case(&intent.destination)
+        || !destination.eq_ignore_ascii_case(&request.settlement_destination)
+        || amount != intent.amount
+    {
+        return Err(SignerError::CalldataMismatch);
+    }
+    Ok(())
+}
+
 impl SignerPolicy {
     pub fn validate(&self, request: &ApprovedSignerRequest) -> Result<(), SignerError> {
         if !self.allowed_classes.contains(&request.transaction_class) {
@@ -227,11 +296,10 @@ impl SignerPolicy {
         {
             return Err(SignerError::WrongSettlementDestination);
         }
-        if matches!(request.transaction_class, TransactionClass::SettleErc20)
-            && !request.transaction.value.is_zero()
-        {
+        if !request.transaction.value.is_zero() {
             return Err(SignerError::UnexpectedValue);
         }
+        validate_settlement_calldata(request, &request.settlement_intent)?;
         Ok(())
     }
 }
@@ -273,7 +341,10 @@ impl TestnetKeySigner {
         })
     }
 
-    async fn submit(&self, transaction: &PreparedTransaction) -> Result<String, SignerError> {
+    pub async fn prepare(
+        &self,
+        transaction: &PreparedTransaction,
+    ) -> Result<PreparedSubmission, SignerError> {
         let chain_id: String = self
             .client
             .post(&self.rpc_url)
@@ -326,6 +397,11 @@ impl TestnetKeySigner {
                 .map_err(|_| SignerError::Rpc("invalid gas estimate".into()))?
                 * ethers_core::types::U256::from(120_u64)
                 / ethers_core::types::U256::from(100_u64);
+        let nonce_value = ethers_core::types::U256::from_str_radix(
+            nonce.trim_start_matches("0x"),
+            16,
+        )
+        .map_err(|_| SignerError::Rpc("invalid nonce".into()))?;
         let tx = ethers_core::types::TransactionRequest::new()
             .to(transaction
                 .to
@@ -343,10 +419,7 @@ impl TestnetKeySigner {
                     .parse::<ethers_core::types::U256>()
                     .map_err(|_| SignerError::Rpc("invalid value".into()))?,
             )
-            .nonce(
-                ethers_core::types::U256::from_str_radix(nonce.trim_start_matches("0x"), 16)
-                    .map_err(|_| SignerError::Rpc("invalid nonce".into()))?,
-            )
+            .nonce(nonce_value)
             .gas_price(
                 ethers_core::types::U256::from_str_radix(gas_price.trim_start_matches("0x"), 16)
                     .map_err(|_| SignerError::Rpc("invalid gas price".into()))?,
@@ -363,10 +436,23 @@ impl TestnetKeySigner {
             "0x{}",
             hex::encode(typed_transaction.rlp_signed(&signature))
         );
+        let raw_bytes = hex::decode(raw.trim_start_matches("0x"))
+            .map_err(|_| SignerError::Rpc("invalid signed transaction".into()))?;
+        Ok(PreparedSubmission {
+            tx_hash: format!("0x{}", hex::encode(keccak256(raw_bytes))),
+            raw_transaction: raw,
+            nonce: nonce_value.to_string(),
+        })
+    }
+
+    pub async fn broadcast(
+        &self,
+        submission: &PreparedSubmission,
+    ) -> Result<String, SignerError> {
         let response: Value = self
             .client
             .post(&self.rpc_url)
-            .json(&json!({"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":[raw]}))
+            .json(&json!({"jsonrpc":"2.0","id":1,"method":"eth_sendRawTransaction","params":[submission.raw_transaction]}))
             .send()
             .await
             .map_err(|e| SignerError::Rpc(e.to_string()))?
@@ -376,11 +462,15 @@ impl TestnetKeySigner {
         if let Some(error) = response.get("error") {
             return Err(SignerError::Rpc(error.to_string()));
         }
-        response
+        let returned = response
             .get("result")
             .and_then(Value::as_str)
             .map(str::to_owned)
-            .ok_or_else(|| SignerError::Rpc("missing tx hash".into()))
+            .ok_or_else(|| SignerError::Rpc("missing tx hash".into()))?;
+        if !returned.eq_ignore_ascii_case(&submission.tx_hash) {
+            return Err(SignerError::Rpc("RPC returned a different transaction hash".into()));
+        }
+        Ok(returned)
     }
 }
 
@@ -410,7 +500,8 @@ impl RestrictedSigner for TestnetKeySigner {
         request: &ApprovedSignerRequest,
     ) -> Result<String, SignerError> {
         self.policy.validate(request)?;
-        self.submit(&request.transaction).await
+        let submission = self.prepare(&request.transaction).await?;
+        self.broadcast(&submission).await
     }
 
     async fn submit_settlement(
@@ -418,7 +509,8 @@ impl RestrictedSigner for TestnetKeySigner {
         request: &SettlementSignerRequest,
     ) -> Result<String, SignerError> {
         self.policy.validate_settlement(request)?;
-        self.submit(&request.transaction).await
+        let submission = self.prepare(&request.transaction).await?;
+        self.broadcast(&submission).await
     }
 }
 
@@ -575,5 +667,73 @@ mod tests {
                 Err(SignerError::CalldataMismatch)
             ));
         }
+    }
+
+    fn settlement_request(class: TransactionClass, token: Option<&str>) -> SettlementSignerRequest {
+        let approved = recovery_request(
+            if token.is_some() {
+                TransactionClass::RecoverErc20
+            } else {
+                TransactionClass::RecoverNative
+            },
+            token,
+        );
+        SettlementSignerRequest {
+            payment_id: flowpay_domain::PaymentId::new(),
+            transaction_class: class,
+            transaction: approved.transaction,
+            expected_factory: "0xfac".into(),
+            settlement_destination: "0x2222222222222222222222222222222222222222".into(),
+            configured_merchant_destination: "0x2222222222222222222222222222222222222222".into(),
+            settlement_intent: SettlementIntent {
+                chain: ChainKey::Bsc,
+                salt: [7_u8; 32],
+                token: token.map(str::to_owned),
+                destination: "0x2222222222222222222222222222222222222222".into(),
+                amount: AtomicAmount::from_str("900").unwrap(),
+            },
+        }
+    }
+
+    #[test]
+    fn binds_all_settlement_calldata_fields_to_intent() {
+        let token = "0x1111111111111111111111111111111111111111";
+        let request = settlement_request(TransactionClass::SettleErc20, Some(token));
+        let policy = SignerPolicy {
+            allowed_classes: [TransactionClass::SettleErc20].into_iter().collect(),
+            factory_address: "0xfac".into(),
+        };
+        assert!(policy.validate_settlement(&request).is_ok());
+
+        for mutation in 0..6 {
+            let mut changed = request.clone();
+            match mutation {
+                0 => changed.settlement_intent.salt[0] ^= 1,
+                1 => changed.settlement_intent.token = Some("0x3333333333333333333333333333333333333333".into()),
+                2 => changed.settlement_intent.destination = "0x4444444444444444444444444444444444444444".into(),
+                3 => changed.settlement_intent.amount = AtomicAmount::from_str("901").unwrap(),
+                4 => changed.transaction.calldata_hex.push_str("00"),
+                _ => changed.transaction.calldata_hex.replace_range(2..10, "00000000"),
+            }
+            assert!(matches!(
+                policy.validate_settlement(&changed),
+                Err(SignerError::CalldataMismatch)
+            ));
+        }
+    }
+
+    #[test]
+    fn validates_native_settlement_and_rejects_native_value() {
+        let mut request = settlement_request(TransactionClass::SettleNative, None);
+        let policy = SignerPolicy {
+            allowed_classes: [TransactionClass::SettleNative].into_iter().collect(),
+            factory_address: "0xfac".into(),
+        };
+        assert!(policy.validate_settlement(&request).is_ok());
+        request.transaction.value = AtomicAmount::from_str("1").unwrap();
+        assert!(matches!(
+            policy.validate_settlement(&request),
+            Err(SignerError::UnexpectedValue)
+        ));
     }
 }

@@ -847,11 +847,25 @@ impl ControlledRecoveryTools for DatabaseAgentTools {
         {
             let signer = TestnetKeySigner::from_private_key(policy, &runtime.rpc_url, private_key)
                 .map_err(|e| ToolError::Permanent(e.to_string()))?;
-            signer
-                .submit_recovery(&request)
-                .await
-                .map(|hash| (hash, "configured-testnet-key"))
+            signer.policy.validate(&request).map_err(|e| ToolError::Permanent(e.to_string()))?;
+            let mut execution_tx = self.state.store.pool().begin().await.map_err(db_err)?;
+            sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+                .bind(format!("{}:{}", plan.source_chain, self.state.config.operator_address.to_ascii_lowercase()))
+                .execute(&mut *execution_tx).await.map_err(db_err)?;
+            let prepared = signer.prepare(&request.transaction).await.map_err(|e| ToolError::Retryable(e.to_string()))?;
+            sqlx::query("INSERT INTO chain_execution_intents(id,operation_type,operation_id,chain,signer_address,raw_transaction,tx_hash,nonce,state) VALUES($1,'RECOVERY',$2,$3,$4,$5,$6,$7::numeric,'SIGNED') ON CONFLICT(operation_type,operation_id) DO UPDATE SET raw_transaction=EXCLUDED.raw_transaction,tx_hash=EXCLUDED.tx_hash,nonce=EXCLUDED.nonce,state='SIGNED',updated_at=now()")
+                .bind(Uuid::now_v7()).bind(plan_id.0).bind(plan.source_chain.to_string()).bind(&self.state.config.operator_address).bind(&prepared.raw_transaction).bind(&prepared.tx_hash).bind(&prepared.nonce).execute(&mut *execution_tx).await.map_err(db_err)?;
+            execution_tx.commit().await.map_err(db_err)?;
+            let result = signer.broadcast(&prepared).await;
+            if result.is_ok() {
+                sqlx::query("UPDATE chain_execution_intents SET state='BROADCAST',updated_at=now() WHERE operation_type='RECOVERY' AND operation_id=$1")
+                    .bind(plan_id.0).execute(self.state.store.pool()).await.map_err(db_err)?;
+            }
+            result.map(|hash| (hash, "configured-testnet-key"))
         } else {
+            if self.state.config.environment != "local" {
+                return Err(ToolError::Permanent("production recovery requires a locally signing restricted signer".into()));
+            }
             let signer = DevUnlockedSigner::new(
                 policy,
                 &runtime.rpc_url,

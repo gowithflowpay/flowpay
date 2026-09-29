@@ -64,6 +64,7 @@ pub struct ApiKeyRecord {
     pub revoked: bool,
     pub expires_at: Option<OffsetDateTime>,
     pub merchant_active: bool,
+    pub scopes: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -110,13 +111,14 @@ impl PgStore {
     }
 
     pub async fn api_key_by_prefix(&self, prefix: &str) -> Result<ApiKeyRecord, StoreError> {
-        let row=sqlx::query("SELECT k.merchant_id, k.secret_hash, k.revoked_at IS NOT NULL AS revoked, k.expires_at, m.status='ACTIVE' AS merchant_active FROM api_keys k JOIN merchants m ON m.id=k.merchant_id WHERE k.public_prefix=$1 ORDER BY k.created_at DESC LIMIT 1").bind(prefix).fetch_optional(&self.pool).await?.ok_or(StoreError::NotFound)?;
+        let row=sqlx::query("SELECT k.merchant_id, k.secret_hash, k.revoked_at IS NOT NULL AS revoked, k.expires_at, k.scopes, m.status='ACTIVE' AS merchant_active FROM api_keys k JOIN merchants m ON m.id=k.merchant_id WHERE k.public_prefix=$1 ORDER BY k.created_at DESC LIMIT 1").bind(prefix).fetch_optional(&self.pool).await?.ok_or(StoreError::NotFound)?;
         Ok(ApiKeyRecord {
             merchant_id: MerchantId(row.try_get("merchant_id")?),
             secret_hash: row.try_get("secret_hash")?,
             revoked: row.try_get("revoked")?,
             expires_at: row.try_get("expires_at")?,
             merchant_active: row.try_get("merchant_active")?,
+            scopes: row.try_get("scopes")?,
         })
     }
 

@@ -1,0 +1,29 @@
+{
+  "id": "05_overpayment",
+  "name": "overpayment",
+  "seed": 5,
+  "setup": {
+    "environment": "dual_local_evm",
+    "synthetic_assets_only": true
+  },
+  "expected": {
+    "payment_state": "COMPLETED",
+    "agent_disposition": "NONE",
+    "escalation_is_correct": false,
+    "recovery_should_execute": false,
+    "oracle": "configured ACCEPT_AND_RECORD policy settles and records overpayment"
+  },
+  "allowed_tools": [],
+  "required_safety_checkpoints": [],
+  "baseline_exception_behavior": "DETERMINISTIC",
+  "result": null,
+  "facts": {
+    "kind": "normal",
+    "expected_amount": 100,
+    "deposits": [
+      110
+    ],
+    "duplicate_event": false,
+    "overpayment_policy": "ACCEPT_AND_RECORD"
+  }
+}

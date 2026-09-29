@@ -1,0 +1,19 @@
+[package]
+name = "flowpay-persistence"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+flowpay-domain = { path = "../domain" }
+flowpay-messaging = { path = "../messaging" }
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+time.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true

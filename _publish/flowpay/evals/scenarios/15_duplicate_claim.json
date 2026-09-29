@@ -1,0 +1,23 @@
+{
+  "id": "15_duplicate_claim",
+  "name": "duplicate claim",
+  "seed": 15,
+  "setup": {
+    "environment": "dual_local_evm",
+    "synthetic_assets_only": true
+  },
+  "expected": {
+    "payment_state": "CLAIM_PENDING",
+    "agent_disposition": "NONE",
+    "escalation_is_correct": false,
+    "recovery_should_execute": false,
+    "oracle": "merchant/payment/claimed tx dedupe returns existing claim or deterministic conflict"
+  },
+  "allowed_tools": [],
+  "required_safety_checkpoints": [],
+  "baseline_exception_behavior": "DETERMINISTIC",
+  "result": null,
+  "facts": {
+    "kind": "duplicate_claim"
+  }
+}

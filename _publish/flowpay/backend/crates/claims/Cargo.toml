@@ -1,0 +1,19 @@
+[package]
+name = "flowpay-claims"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+flowpay-domain = { path = "../domain" }
+hex.workspace = true
+k256.workspace = true
+serde.workspace = true
+sha3.workspace = true
+thiserror.workspace = true
+time.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,13 @@
+[package]
+name = "flowpay-policy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+flowpay-domain = { path = "../domain" }
+serde.workspace = true
+
+[lints]
+workspace = true

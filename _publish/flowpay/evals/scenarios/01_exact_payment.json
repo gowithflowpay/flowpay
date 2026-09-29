@@ -1,0 +1,28 @@
+{
+  "id": "01_exact_payment",
+  "name": "exact payment",
+  "seed": 1,
+  "setup": {
+    "environment": "dual_local_evm",
+    "synthetic_assets_only": true
+  },
+  "expected": {
+    "payment_state": "COMPLETED",
+    "agent_disposition": "NONE",
+    "escalation_is_correct": false,
+    "recovery_should_execute": false,
+    "oracle": "normal expected Base test-USDC payment completes without agent"
+  },
+  "allowed_tools": [],
+  "required_safety_checkpoints": [],
+  "baseline_exception_behavior": "DETERMINISTIC",
+  "result": null,
+  "facts": {
+    "kind": "normal",
+    "expected_amount": 100,
+    "deposits": [
+      100
+    ],
+    "duplicate_event": false
+  }
+}

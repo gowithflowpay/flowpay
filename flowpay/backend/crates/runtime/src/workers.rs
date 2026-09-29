@@ -8,14 +8,15 @@ use flowpay_payments::{reconcile, ObservedDeposit, ReconciliationInput};
 use flowpay_persistence::StoredDeposit;
 use flowpay_recovery::{build_factory_erc20_sweep, build_factory_native_sweep};
 use flowpay_signer::{
-    DevUnlockedSigner, RestrictedSigner, SettlementSignerRequest, SignerPolicy, TestnetKeySigner,
-    TransactionClass,
+    DevUnlockedSigner, RestrictedSigner, SettlementIntent, SettlementSignerRequest, SignerPolicy,
+    TestnetKeySigner, TransactionClass,
 };
 use serde_json::{json, Value};
 use sqlx::Row;
-use std::{collections::BTreeSet, time::Duration as StdDuration};
+use std::{collections::{BTreeSet, HashSet}, str::FromStr, time::Duration as StdDuration};
 use time::OffsetDateTime;
 use tracing::{error, info, warn};
+use uuid::Uuid;
 
 pub fn spawn_periodic(state: AppState) {
     let settlement = state.clone();
@@ -259,7 +260,39 @@ async fn payment_monitor_tick(state: &AppState) -> anyhow::Result<()> {
                     continue;
                 }
             };
+            let observed_keys = transfers
+                .iter()
+                .map(|transfer| {
+                    (
+                        transfer.tx_hash.to_ascii_lowercase(),
+                        transfer.log_index.map(|value| i64::try_from(value).unwrap_or(i64::MAX)),
+                    )
+                })
+                .collect::<HashSet<_>>();
+            let persisted = sqlx::query(
+                "SELECT tx_hash,log_index FROM deposits WHERE payment_id=$1 AND chain=$2 AND confirmation_status<>'ORPHANED' AND observed_block_number BETWEEN $3::numeric AND $4::numeric",
+            )
+            .bind(payment.id.0)
+            .bind(chain.to_string())
+            .bind(from.to_string())
+            .bind(to.to_string())
+            .fetch_all(state.store.pool())
+            .await?;
             let mut saw_new = false;
+            for row in persisted {
+                let tx_hash: String = row.try_get("tx_hash")?;
+                let log_index: Option<i64> = row.try_get("log_index")?;
+                if !observed_keys.contains(&(tx_hash.to_ascii_lowercase(), log_index)) {
+                    let mut tx = state.store.pool().begin().await?;
+                    sqlx::query("UPDATE deposits SET confirmation_status='ORPHANED',confirmations=0,updated_at=now() WHERE payment_id=$1 AND chain=$2 AND lower(tx_hash)=lower($3) AND log_index IS NOT DISTINCT FROM $4")
+                        .bind(payment.id.0).bind(chain.to_string()).bind(&tx_hash).bind(log_index).execute(&mut *tx).await?;
+                    sqlx::query("UPDATE chain_transactions SET canonical=false,verified_at=now() WHERE chain=$1 AND lower(tx_hash)=lower($2)")
+                        .bind(chain.to_string()).bind(&tx_hash).execute(&mut *tx).await?;
+                    tx.commit().await?;
+                    saw_new = true;
+                    warn!(payment_id=%payment.id.0,%chain,%tx_hash,"persisted deposit orphaned after canonical overlap scan");
+                }
+            }
             for transfer in transfers {
                 let conf = match runtime
                     .adapter
@@ -432,6 +465,12 @@ async fn process_alchemy_webhook(state: &AppState, payload: &Value) -> anyhow::R
         .and_then(Value::as_str)
         .ok_or_else(|| anyhow::anyhow!("Alchemy payload has no event network"))?;
     let chain = match network.to_ascii_uppercase().as_str() {
+        "BASE_MAINNET" | "BASE" => ChainKey::Base,
+        "ETH_MAINNET" | "ETHEREUM_MAINNET" => ChainKey::Custom("ethereum".into()),
+        "ARB_MAINNET" | "ARBITRUM_MAINNET" => ChainKey::Custom("arbitrum".into()),
+        "OPT_MAINNET" | "OPTIMISM_MAINNET" => ChainKey::Custom("optimism".into()),
+        "MATIC_MAINNET" | "POLYGON_MAINNET" => ChainKey::Custom("polygon".into()),
+        "BSC_MAINNET" | "BNB_MAINNET" => ChainKey::Bsc,
         "BASE_SEPOLIA" => ChainKey::Custom("base_sepolia".into()),
         "ETH_SEPOLIA" => ChainKey::Custom("ethereum_sepolia".into()),
         "ARB_SEPOLIA" => ChainKey::Custom("arbitrum_sepolia".into()),
@@ -468,91 +507,15 @@ async fn process_alchemy_webhook(state: &AppState, payload: &Value) -> anyhow::R
         .bind(address)
         .fetch_all(state.store.pool())
         .await?;
-        let tx_hash = activity
+        activity
             .get("hash")
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow::anyhow!("Alchemy activity has no transaction hash"))?;
-        let from = activity
-            .get("fromAddress")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown");
-        let symbol = activity
-            .get("asset")
-            .and_then(Value::as_str)
-            .unwrap_or("UNKNOWN");
-        let raw = activity
-            .pointer("/rawContract/rawValue")
-            .and_then(Value::as_str);
-        let decimals = activity
-            .pointer("/rawContract/decimals")
-            .and_then(|value| {
-                value
-                    .as_u64()
-                    .or_else(|| value.as_str().and_then(parse_hex_u64))
-            })
-            .unwrap_or(18)
-            .min(255) as u8;
-        let token_contract = activity
-            .pointer("/rawContract/address")
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned);
-        let amount = if let Some(raw) = raw {
-            AtomicAmount::from_hex_quantity(raw)?
-        } else {
-            AtomicAmount::from_decimal(
-                activity
-                    .get("value")
-                    .and_then(Value::as_f64)
-                    .unwrap_or_default()
-                    .to_string()
-                    .as_str(),
-                decimals,
-            )?
-        };
         for row in rows {
             let payment_id = flowpay_domain::PaymentId(row.try_get("id")?);
-            let payment = state.store.get_payment_by_id(payment_id).await?;
-            let contract_matches = match (
-                payment.expected_asset.token_contract.as_deref(),
-                token_contract.as_deref(),
-            ) {
-                (None, None) => true,
-                (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
-                _ => false,
-            };
-            let classification = if chain == payment.expected_chain
-                && symbol.eq_ignore_ascii_case(&payment.expected_asset.symbol)
-                && contract_matches
-            {
-                "EXPECTED_ASSET"
-            } else if token_contract.is_some() {
-                "WRONG_ASSET"
-            } else {
-                "NATIVE_TRANSFER"
-            };
-            let deposit = StoredDeposit {
-                chain: chain.clone(),
-                tx_hash: tx_hash.to_owned(),
-                log_index: None,
-                from_address: from.to_owned(),
-                to_address: address.to_owned(),
-                asset_symbol: symbol.to_owned(),
-                token_contract: token_contract.clone(),
-                asset_decimals: decimals,
-                amount: amount.clone(),
-                classification: classification.into(),
-                confirmation_status: "FINAL".into(),
-                confirmations: 0,
-            };
             state
                 .store
-                .record_verified_deposit(
-                    payment_id,
-                    &deposit,
-                    block_number,
-                    &format!("alchemy-notify:{network}:{block_number}"),
-                )
+                .set_monitor_cursor(payment_id, &chain, block_number.saturating_sub(1), None)
                 .await?;
             if !payments.contains(&payment_id) {
                 payments.push(payment_id);
@@ -563,17 +526,14 @@ async fn process_alchemy_webhook(state: &AppState, payload: &Value) -> anyhow::R
         return Ok(());
     }
 
-    // After recording all deposits, move each payment directly to CONFIRMED
-    // or WRONG_ASSET. No intermediate DETECTED/CONFIRMING states.
-    for payment_id in payments {
-        reconcile_webhook_payment(state, payment_id, &chain).await?;
-    }
+    info!(%chain, payment_count=payments.len(), "Alchemy hint queued for canonical RPC verification");
     Ok(())
 }
 
 /// Reconcile a webhook-triggered payment directly to CONFIRMED or WRONG_ASSET.
 /// All deposits from Alchemy webhooks are already marked FINAL — no
 /// intermediate DETECTED/CONFIRMING states needed.
+#[allow(dead_code)]
 async fn reconcile_webhook_payment(
     state: &AppState,
     payment_id: flowpay_domain::PaymentId,
@@ -687,10 +647,57 @@ async fn settlement_tick(state: &AppState) -> anyhow::Result<()> {
     };
     let heartbeat =
         spawn_lease_heartbeat(state.clone(), "settlement-coordinator", holder.clone(), 120);
-    let result = settlement_tick_inner(state).await;
+    let result = async {
+        reconcile_submitted_settlements(state).await?;
+        settlement_tick_inner(state).await
+    }
+    .await;
     heartbeat.abort();
     release_service_lease(state, "settlement-coordinator", &holder).await;
     result
+}
+
+async fn reconcile_submitted_settlements(state: &AppState) -> anyhow::Result<()> {
+    let rows = sqlx::query("SELECT s.payment_id,s.chain,s.token_contract,s.amount_atomic::text AS amount,s.destination,s.tx_hash,s.simulation_result FROM settlements s WHERE s.state='SUBMITTED' ORDER BY s.updated_at LIMIT 20")
+        .fetch_all(state.store.pool()).await?;
+    for row in rows {
+        let payment_id = flowpay_domain::PaymentId(row.try_get("payment_id")?);
+        let chain = ChainKey::from_str(&row.try_get::<String, _>("chain")?)?;
+        let Some(runtime) = state.chains.get(&chain) else { continue };
+        let tx_hash: String = row.try_get("tx_hash")?;
+        let receipt = match runtime.adapter.receipt(&tx_hash).await {
+            Ok(receipt) => receipt,
+            Err(flowpay_chains::ChainError::TransactionNotFound | flowpay_chains::ChainError::ProviderUnavailable(_)) => continue,
+            Err(error) => { warn!(%tx_hash,%error,"settlement receipt reconciliation deferred"); continue; }
+        };
+        if !receipt.success {
+            sqlx::query("UPDATE settlements SET state='FAILED',updated_at=now() WHERE payment_id=$1")
+                .bind(payment_id.0).execute(state.store.pool()).await?;
+            state.store.set_payment_state(payment_id, PaymentState::Failed, "settlement_reverted", Some(&chain), Some(&tx_hash)).await?;
+            continue;
+        }
+        let destination: String = row.try_get("destination")?;
+        let token: Option<String> = row.try_get("token_contract")?;
+        let amount = row.try_get::<String, _>("amount")?.parse::<AtomicAmount>()?;
+        let simulation: Value = row.try_get("simulation_result")?;
+        let before = simulation.get("destination_balance_before").and_then(Value::as_str).unwrap_or("0").parse::<AtomicAmount>()?;
+        let after = if let Some(token) = token.as_deref() {
+            runtime.adapter.token_balance(token, &destination).await?
+        } else {
+            runtime.adapter.native_balance(&destination).await?
+        };
+        let required_after = AtomicAmount::from_biguint(before.inner() + amount.inner());
+        if after < required_after {
+            warn!(%tx_hash,"mined settlement has not produced the required destination balance delta");
+            continue;
+        }
+        sqlx::query("UPDATE settlements SET state='CONFIRMED',updated_at=now() WHERE payment_id=$1")
+            .bind(payment_id.0).execute(state.store.pool()).await?;
+        let payment = state.store.get_payment_by_id(payment_id).await?;
+        state.store.set_payment_state(payment_id, PaymentState::Completed, "settlement_receipt_and_destination_delta_verified", Some(&chain), Some(&tx_hash)).await?;
+        emit_payment_event(state, &payment, PaymentState::Completed, "settlement_receipt_and_destination_delta_verified").await?;
+    }
+    Ok(())
 }
 
 async fn settlement_tick_inner(state: &AppState) -> anyhow::Result<()> {
@@ -780,6 +787,11 @@ async fn settlement_tick_inner(state: &AppState) -> anyhow::Result<()> {
                 .await?;
             continue;
         }
+        let destination_balance_before = if let Some(token) = payment.expected_asset.token_contract.as_deref() {
+            runtime.adapter.token_balance(token, &destination).await?
+        } else {
+            runtime.adapter.native_balance(&destination).await?
+        };
 
         state
             .store
@@ -802,12 +814,35 @@ async fn settlement_tick_inner(state: &AppState) -> anyhow::Result<()> {
             expected_factory: runtime.factory.clone(),
             settlement_destination: destination.clone(),
             configured_merchant_destination: destination.clone(),
+            settlement_intent: SettlementIntent {
+                chain: payment.expected_chain.clone(),
+                salt,
+                token: payment.expected_asset.token_contract.clone(),
+                destination: destination.clone(),
+                amount: canonical_amount.clone(),
+            },
         };
         let submission = if let Some(private_key) = state.config.operator_private_key.as_deref() {
-            TestnetKeySigner::from_private_key(policy, &runtime.rpc_url, private_key)?
-                .submit_settlement(&request)
-                .await
+            let signer = TestnetKeySigner::from_private_key(policy, &runtime.rpc_url, private_key)?;
+            signer.policy.validate_settlement(&request)?;
+            let mut execution_tx = state.store.pool().begin().await?;
+            sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+                .bind(format!("{}:{}", payment.expected_chain, state.config.operator_address.to_ascii_lowercase()))
+                .execute(&mut *execution_tx).await?;
+            let prepared = signer.prepare(&request.transaction).await?;
+            sqlx::query("INSERT INTO chain_execution_intents(id,operation_type,operation_id,chain,signer_address,raw_transaction,tx_hash,nonce,state) VALUES($1,'SETTLEMENT',$2,$3,$4,$5,$6,$7::numeric,'SIGNED') ON CONFLICT(operation_type,operation_id) DO UPDATE SET raw_transaction=EXCLUDED.raw_transaction,tx_hash=EXCLUDED.tx_hash,nonce=EXCLUDED.nonce,state='SIGNED',updated_at=now()")
+                .bind(Uuid::now_v7()).bind(payment.id.0).bind(payment.expected_chain.to_string()).bind(&state.config.operator_address).bind(&prepared.raw_transaction).bind(&prepared.tx_hash).bind(&prepared.nonce).execute(&mut *execution_tx).await?;
+            execution_tx.commit().await?;
+            let result = signer.broadcast(&prepared).await;
+            if result.is_ok() {
+                sqlx::query("UPDATE chain_execution_intents SET state='BROADCAST',updated_at=now() WHERE operation_type='SETTLEMENT' AND operation_id=$1")
+                    .bind(payment.id.0).execute(state.store.pool()).await?;
+            }
+            result
         } else {
+            if state.config.environment != "local" {
+                return Err(anyhow::anyhow!("production settlement requires a locally signing restricted signer"));
+            }
             DevUnlockedSigner::new(policy, &runtime.rpc_url, &state.config.operator_address)
                 .submit_settlement(&request)
                 .await
@@ -838,26 +873,20 @@ async fn settlement_tick_inner(state: &AppState) -> anyhow::Result<()> {
             .bind(canonical_amount.to_string())
             .bind(&destination)
             .bind(&tx_hash)
-            .bind(json!({"success":true,"gas_estimate":simulation.gas_estimate}))
+            .bind(json!({"success":true,"gas_estimate":simulation.gas_estimate,"destination_balance_before":destination_balance_before.to_string()}))
             .execute(state.store.pool()).await?;
 
         let mut verified = false;
         for _ in 0..15 {
             match runtime.adapter.receipt(&tx_hash).await {
                 Ok(r) if r.success => {
-                    let remaining =
-                        if let Some(token) = payment.expected_asset.token_contract.as_deref() {
-                            runtime
-                                .adapter
-                                .token_balance(token, &payment.checkout_address.value)
-                                .await?
-                        } else {
-                            runtime
-                                .adapter
-                                .native_balance(&payment.checkout_address.value)
-                                .await?
-                        };
-                    if remaining.is_zero() {
+                    let destination_after = if let Some(token) = payment.expected_asset.token_contract.as_deref() {
+                        runtime.adapter.token_balance(token, &destination).await?
+                    } else {
+                        runtime.adapter.native_balance(&destination).await?
+                    };
+                    let required_after = AtomicAmount::from_biguint(destination_balance_before.inner() + canonical_amount.inner());
+                    if destination_after >= required_after {
                         verified = true;
                         break;
                     }
@@ -893,16 +922,7 @@ async fn settlement_tick_inner(state: &AppState) -> anyhow::Result<()> {
             .await?;
             info!(payment_id=%payment.id.0,tx_hash=%tx_hash,"payment completed");
         } else {
-            state
-                .store
-                .set_payment_state(
-                    payment.id,
-                    PaymentState::Failed,
-                    "settlement_verification_failed",
-                    Some(&payment.expected_chain),
-                    Some(&tx_hash),
-                )
-                .await?;
+            info!(payment_id=%payment.id.0,tx_hash=%tx_hash,"settlement remains submitted for asynchronous reconciliation");
         }
     }
     Ok(())

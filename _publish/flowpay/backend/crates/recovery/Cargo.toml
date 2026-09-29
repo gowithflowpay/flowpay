@@ -1,0 +1,20 @@
+[package]
+name = "flowpay-recovery"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+alloy-primitives.workspace = true
+flowpay-chains = { path = "../chains" }
+flowpay-domain = { path = "../domain" }
+flowpay-policy = { path = "../policy" }
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "scenario_files": [
+    "01_exact_payment.json",
+    "02_underpayment.json",
+    "03_two_partial_payments.json",
+    "04_three_partial_payments.json",
+    "05_overpayment.json",
+    "06_wrong_token_same_chain.json",
+    "07_wrong_supported_evm_chain.json",
+    "08_wrong_chain_wrong_token.json",
+    "09_fake_transaction_hash.json",
+    "10_invalid_claimant.json",
+    "11_valid_self_custody_recovery.json",
+    "12_insufficient_recovery_gas.json",
+    "13_funds_already_moved.json",
+    "14_duplicate_webhook.json",
+    "15_duplicate_claim.json",
+    "16_rpc_provider_failure.json",
+    "17_simulation_failure.json",
+    "18_unsupported_token.json",
+    "19_unsupported_network.json",
+    "20_valid_cross_chain_recoverable.json"
+  ]
+}

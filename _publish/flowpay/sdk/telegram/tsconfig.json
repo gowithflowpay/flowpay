@@ -1,0 +1,4 @@
+{
+  "compilerOptions":{"target":"ES2022","module":"NodeNext","moduleResolution":"NodeNext","strict":true,"outDir":"dist","rootDir":"src","lib":["ES2022","DOM"],"skipLibCheck":true,"baseUrl":".","paths":{"@flowpay/node":["../node/dist/index.d.ts"]}},
+  "include":["src/**/*.ts","src/**/*.d.ts"]
+}
