@@ -190,6 +190,7 @@ async function cmdInit(flags: Record<string, string | boolean>): Promise<void> {
   log("Open this URL and approve the device:");
   log(`  ${grant.verification_uri}`);
   log(`Code: ${grant.user_code}`);
+  if (!flags.json && !flags["no-open"] && process.stdin.isTTY) await openBrowser(grant.verification_uri);
   log("Waiting for approval… (Ctrl+C to cancel)");
   const deadline = Date.now() + grant.expires_in * 1000;
   let intervalMs = grant.interval * 1000;
@@ -226,6 +227,15 @@ async function cmdInit(flags: Record<string, string | boolean>): Promise<void> {
       fail(new Error("device grant was denied"));
     }
   }
+}
+
+async function openBrowser(value: string): Promise<void> {
+  const url=new URL(value);
+  if(url.protocol!=="https:"||url.username||url.password){log("Open the printed checkout URL manually.");return;}
+  const {execFile}=await import("node:child_process");
+  const command=process.platform==="win32"?"rundll32.exe":process.platform==="darwin"?"open":"xdg-open";
+  const args=process.platform==="win32"?["url.dll,FileProtocolHandler",url.toString()]:[url.toString()];
+  await new Promise<void>(resolve=>execFile(command,args,{timeout:10000},error=>{if(error)log("Open the printed URL in your browser.");resolve();}));
 }
 
 function baseUrl(flags: Record<string, string | boolean>): string {
@@ -379,6 +389,7 @@ async function cmdRequest(args: string[], flags: Record<string, string | boolean
   );
   const view = paymentView(payment);
   out(view, humanPayment(payment));
+  if (!flags.json && !flags["no-open"] && (flags.open || process.stdin.isTTY)) await openBrowser(payment.checkout_url);
   if (!flags["no-wait"] && !flags.json) {
     log("\nWaiting for payment… (Ctrl+C to stop; the payment stays live)");
     let previousStatus="";

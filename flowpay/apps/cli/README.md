@@ -13,6 +13,8 @@ Registration prompts for business name, contact name, email and EVM settlement a
 
 Requests print a wallet address and checkout URL, then monitor the backend until confirmed. Use `--no-wait` to return immediately or `--json` for scripts. Resume with `flowpay payment wait PAYMENT_ID`. Read state with `flowpay payment status PAYMENT_ID --json`.
 
+Interactive requests open the HTTPS checkout in your browser. Use `--no-open` to keep the browser closed or `--open` to explicitly open checkout. JSON automation never launches a browser.
+
 Existing merchants can run `flowpay init` and approve a device in the dashboard. Credentials are saved locally; `FLOWPAY_CONFIG_DIR` isolates agent configurations. `flowpay logout` removes local credentials. Never put tokens in chat or logs.
 
 Agents can create requests, exchange checkout URLs, and monitor receipts. Wallet transfers require the payer's wallet; the CLI does not broadcast them.
