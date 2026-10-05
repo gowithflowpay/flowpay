@@ -73,6 +73,9 @@ pub struct Config {
     pub auth_code_ttl_minutes: i64,
     /// Public base URL of the merchant dashboard, used in any links we email.
     pub dashboard_base_url: String,
+    pub device_grant_ttl_seconds: i64,
+    pub device_grant_max_polls: i32,
+    pub wallet_challenge_ttl_seconds: i64,
 }
 
 impl Config {
@@ -313,6 +316,18 @@ impl Config {
                 .unwrap_or_else(|_| "https://pixuno.xyz".into())
                 .trim_end_matches('/')
                 .to_owned(),
+            device_grant_ttl_seconds: env::var("FLOWPAY_DEVICE_GRANT_TTL_SECONDS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(900),
+            device_grant_max_polls: env::var("FLOWPAY_DEVICE_GRANT_MAX_POLLS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(600),
+            wallet_challenge_ttl_seconds: env::var("FLOWPAY_WALLET_CHALLENGE_TTL_SECONDS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(300),
         })
     }
 

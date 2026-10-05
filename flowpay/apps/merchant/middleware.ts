@@ -4,6 +4,7 @@ import {ONBOARDED_COOKIE,SESSION_COOKIE} from "./lib/cookies";
 // "/" is the public marketing page, so a signed-out visitor can read it.
 // Checkout and claim pages are public too: they are what a customer opens.
 const PUBLIC_PATHS=[
+  "/docs",
   "/api/auth",
   "/api/payment",
   "/api/claims",
@@ -45,7 +46,7 @@ export function middleware(request:NextRequest){
     // API callers get a machine-readable refusal; browsers are sent to the sign-in page.
     if(pathname.startsWith("/api/"))return NextResponse.json({error:{message:"Authentication required."}},{status:401});
     const target=new URL("/login",request.url);
-    target.searchParams.set("next",pathname);
+    target.searchParams.set("next",pathname+request.nextUrl.search);
     return NextResponse.redirect(target);
   }
   return NextResponse.next();

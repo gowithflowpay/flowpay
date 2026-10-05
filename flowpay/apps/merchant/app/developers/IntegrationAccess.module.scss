@@ -1,0 +1,11 @@
+.access{display:grid;grid-template-columns:1.2fr 1fr;gap:32px;align-items:center;padding:28px 32px;margin:0 0 28px;border:1px solid var(--access-border,#e7e9f2);border-radius:16px;background:var(--access-background,#fff)}
+.eyebrow{font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:#6855ed;font-weight:700}
+.access h2{margin:8px 0;font-size:22px;letter-spacing:-.03em}
+.access p{margin:0;color:var(--access-muted,#667085);max-width:440px;line-height:1.7}
+.actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:20px}
+.steps{padding:20px;background:var(--access-code-background,#f8f9fc);border:1px solid var(--access-border,#e7e9f2);border-radius:12px;min-width:0}
+.steps span{display:block;margin:0 0 8px;color:var(--access-muted,#667085);font-size:12px}
+.steps code{display:block;overflow-wrap:anywhere;font-size:12px;line-height:1.7;color:var(--access-code,#3d3c58)}
+.steps code+span{margin-top:16px}
+:global(html[data-theme="dark"]) .access{--access-border:#26303f;--access-background:#131721;--access-muted:#9aa5b7;--access-code-background:#0f1520;--access-code:#c3b2ff}
+@media(max-width:700px){.access{grid-template-columns:1fr;padding:22px;gap:22px}.access h2{font-size:20px}.actions a{flex:1;text-align:center;justify-content:center}}

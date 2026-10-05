@@ -1,0 +1,22 @@
+{
+  "name": "@flowpay/cli",
+  "version": "0.1.0",
+  "private": false,
+  "type": "module",
+  "bin": { "flowpay": "dist/index.js" },
+  "files": ["dist", "README.md"],
+  "engines": {"node": ">=20"},
+  "bundledDependencies": ["@flowpay/node"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "check": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@flowpay/node": "file:../../sdk/node"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.8.3"
+  }
+}

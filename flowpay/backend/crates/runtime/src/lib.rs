@@ -1,5 +1,7 @@
+pub mod agent_access;
 pub mod agent_runtime;
 pub mod auth;
+pub mod oauth;
 pub mod config;
 pub mod error;
 pub mod routes;

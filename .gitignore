@@ -4,3 +4,17 @@
 *-before-*.env
 *-local-*.patch
 
+# Local artifacts and verification profiles
+.local/
+.chrome-*/
+.edge-*/
+.pixuno-ui-*/
+.video-*/
+.freebuff/
+_cargo-publish-check/
+_publish/
+*.tgz
+*.png
+.flowpay-*.py
+
+.publish-flowpay-security-20260929/

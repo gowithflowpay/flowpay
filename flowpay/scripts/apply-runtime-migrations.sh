@@ -13,6 +13,11 @@ if [[ "$cursor_key" != *"payment_id, chain"* ]]; then
   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f backend/database/migrations/0009_chain_aware_monitoring.sql
 fi
 
+# These migrations add identity, scoped keys and CLI access idempotently.
+for migration in 0014_merchant_auth.sql 0015_production_safety.sql 0016_cli_agent_access.sql 0017_mcp_oauth.sql; do
+  psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "backend/database/migrations/$migration"
+done
+
 approval_constraint="$(psql "$DATABASE_URL" -Atc "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname='approvals_status_check' AND conrelid='approvals'::regclass")"
 if [[ "$approval_constraint" != *"EXECUTING"* ]]; then
   psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f backend/database/migrations/0010_security_hardening.sql

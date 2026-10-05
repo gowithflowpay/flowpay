@@ -28,3 +28,14 @@ alchemy-webhook.txt
 deployer-pk.txt
 *.png
 !apps/checkout/public/assets/glossy-neon-robot-assistant-icon.png
+
+# Temporary browser profiles and generated verification artifacts
+.chrome-*/
+.edge-*/
+.video-*/
+*.merge
+apps/cli/dist/
+apps/mcp/dist/
+apps/mcp/dist-http/
+sdk/node/dist/
+.hero-check-profile*/

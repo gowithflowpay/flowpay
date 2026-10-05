@@ -70,6 +70,12 @@ html[data-theme="dark"] .mobile-signout{background:rgba(139,92,246,.14);border-c
 }
 
 /* Signup form sits directly on a full-viewport video. */
+.auth-methods{display:flex;gap:4px;padding:5px;margin-bottom:24px;border:1px solid rgba(255,255,255,.2);border-radius:12px;background:rgba(255,255,255,.07)}
+.auth-methods button{flex:1;min-height:42px;border:0;border-radius:8px;background:transparent;color:#d6e3f4;font:inherit;font-size:14px;cursor:pointer}
+.auth-methods button[aria-pressed="true"]{background:#fff;color:#142b46;box-shadow:0 2px 8px rgba(0,0,0,.12)}
+.auth-methods button:focus-visible{outline:2px solid #84b4ff;outline-offset:2px}
+.auth-methods button:disabled{opacity:.6;cursor:progress}
+.auth-email-hint{margin:0 0 24px;color:#d6e3f4;font-size:13px;line-height:1.6}
 .auth-page-cardless{width:min(460px,100%);color:#fff}
 .auth-page-cardless:before{content:"";position:fixed;inset:0;background:rgba(6,21,43,.76);z-index:-1;pointer-events:none}
 .auth-page-cardless .auth-background-video{z-index:-2}

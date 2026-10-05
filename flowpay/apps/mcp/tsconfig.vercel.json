@@ -4,5 +4,5 @@
     "noEmit": true,
     "rootDir": "."
   },
-  "include": ["src/**/*.ts", "api/**/*.ts"]
+  "include": ["src/index.ts", "src/http.ts", "api/**/*.ts"]
 }

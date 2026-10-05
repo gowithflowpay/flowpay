@@ -4,6 +4,7 @@ import {StdioServerTransport} from "@modelcontextprotocol/sdk/server/stdio.js";
 import {mkdir,readFile,writeFile} from "node:fs/promises";
 import {existsSync} from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import {z} from "zod";
 
 const root=path.resolve(process.env.FLOWPAY_PROJECT_ROOT??process.cwd());
@@ -25,14 +26,27 @@ async function jsonRequest(route:string,init:RequestInit){
   return body;
 }
 
+async function cliCredentials():Promise<{apiKey?:string;sessionToken?:string;sessionExpiresAt?:number; baseUrl?:string}>{
+  const directory=process.env.FLOWPAY_CONFIG_DIR??path.join(os.homedir(),".flowpay");
+  try{
+    const config=JSON.parse(await readFile(path.join(directory,"config.json"),"utf8"));
+    return typeof config==="object"&&config!==null?config:{};
+  }catch(error){
+    if((error as NodeJS.ErrnoException).code==="ENOENT")return {};
+    throw new Error("Unable to read CLI credentials; run flowpay login again");
+  }
+}
+
 async function provisionCredential(label:string){
-  const existing=process.env.FLOWPAY_API_KEY?.trim();
+  const config=process.env.FLOWPAY_API_KEY||process.env.FLOWPAY_MERCHANT_TOKEN?{}:await cliCredentials();
+  if(config.baseUrl&&config.baseUrl.replace(/\/$/,"")!==apiBase)throw new Error("CLI credentials belong to a different API; set FLOWPAY_API_URL to the CLI's configured API URL");
+  const existing=process.env.FLOWPAY_API_KEY?.trim()||config.apiKey?.trim();
   if(existing){
     await jsonRequest("/v1/payments?limit=1",{headers:{"x-flowpay-api-key":existing}});
     return existing;
   }
-  const token=process.env.FLOWPAY_MERCHANT_TOKEN?.trim();
-  if(!token)throw new Error("Configure FLOWPAY_API_KEY or FLOWPAY_MERCHANT_TOKEN in the MCP server environment");
+  const token=process.env.FLOWPAY_MERCHANT_TOKEN?.trim()||(!config.sessionExpiresAt||config.sessionExpiresAt>Date.now()?config.sessionToken?.trim():undefined);
+  if(!token)throw new Error("Run flowpay login or flowpay init, or configure FLOWPAY_API_KEY or FLOWPAY_MERCHANT_TOKEN in the MCP server environment");
   const result=await jsonRequest("/v1/api-keys",{
     method:"POST",
     headers:{authorization:`Bearer ${token}`,"content-type":"application/json"},

@@ -1,42 +1,17 @@
 # FlowPay MCP
 
-FlowPay MCP supports both a local installer and a hosted Streamable HTTP service. It installs a server-side, crypto-only FlowPay checkout without returning the FlowPay API key to the model.
+Remote server: **https://mcp.pixuno.xyz/mcp**
 
-## Hosted MCP
+Add this URL in a compatible ChatGPT or Claude remote MCP connector. FlowPay advertises protected-resource metadata and OAuth authorization-server metadata. The client opens the FlowPay consent page, where the user signs in by email, reviews payment permissions, and approves access.
 
-Connect an MCP-compatible client to `https://mcp.pixuno.xyz/mcp` and store a live FlowPay API key as the connector's Bearer token. The credential is validated against FlowPay before MCP initialization and is never included in tool output.
+OAuth uses authorization code with PKCE S256, exact registered redirect URIs, resource audience checks, short-lived access tokens and rotating refresh tokens. Approval and revocation are stored in PostgreSQL. Disconnect apps from Developers in the merchant dashboard. Tokens never appear in tool responses or prompts.
 
-Available hosted tools:
+Hosted tools provide an integration guide, server-side Next.js checkout generation, credential verification, payment listing, payment lookup and payment creation. Payment tools enforce `payments:read` or `payments:write`. Creating a request does not broadcast a wallet transfer.
 
-- `flowpay_integration_guide`
-- `flowpay_generate_nextjs_integration`
-- `flowpay_verify_credentials`
-- `flowpay_list_payments`
-- `flowpay_get_payment`
-- `flowpay_create_payment`
+## Local stdio installer
 
-The generated browser component calls a server-only route. Only that route reads `FLOWPAY_API_KEY` from the deployment secret manager.
+Build `apps/mcp` with `npm ci` and `npm run build`. Configure the MCP client to launch `node /absolute/path/to/apps/mcp/dist/index.js`, with `FLOWPAY_PROJECT_ROOT` set to your site's directory. Run `flowpay login` or `flowpay init` first. The installer reads the local CLI configuration for the same API URL; an email session is exchanged for a separate revocable integration key. Use `FLOWPAY_CONFIG_DIR` to select an isolated agent configuration.
 
-## Local installer
+Explicit `FLOWPAY_API_KEY` or `FLOWPAY_MERCHANT_TOKEN` environment credentials are also supported for local automation. Store them in the client configuration or secret manager. The installer writes server-only `.env.local` with owner permissions and returns redacted status. Generated browser code never includes the merchant key.
 
-```json
-{
-  "mcpServers": {
-    "flowpay": {
-      "command": "node",
-      "args": ["/path/to/flowpay/apps/mcp/dist/index.js"],
-      "env": {
-        "FLOWPAY_PROJECT_ROOT": "/path/to/your/site",
-        "FLOWPAY_API_URL": "https://api.pixuno.xyz",
-        "FLOWPAY_MERCHANT_TOKEN": "merchant-session-token"
-      }
-    }
-  }
-}
-```
-
-`FLOWPAY_API_KEY` can be supplied instead of a merchant token. Credentials belong in the MCP client configuration or a secret manager, never in chat. The installer writes `.env.local` with owner-only permissions and only returns redacted status.
-
-## ChatGPT
-
-Run this private stdio server beside the site repository and connect it to ChatGPT through Secure MCP Tunnel. The tunnel keeps the project files and FlowPay credential on the developer machine while ChatGPT discovers and calls the MCP tools. After connecting it in ChatGPT developer mode, a prompt such as `Integrate FlowPay crypto checkout into this site and verify it` runs the inspect, install, and verification workflow without placing the API key in model context.
+Documentation: https://pixuno.xyz/docs#mcp

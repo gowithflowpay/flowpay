@@ -6,6 +6,8 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+aes-gcm.workspace = true
+sha3.workspace = true
 anyhow.workspace = true
 argon2.workspace = true
 lettre.workspace = true

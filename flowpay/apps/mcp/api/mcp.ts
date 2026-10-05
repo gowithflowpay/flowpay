@@ -4,6 +4,9 @@ import {z} from "zod";
 
 const apiBase=(process.env.FLOWPAY_API_URL??"https://api.pixuno.xyz").replace(/\/$/,"");
 const checkoutBase=(process.env.FLOWPAY_CHECKOUT_URL??"https://checkout.pixuno.xyz").replace(/\/$/,"");
+const mcpResource=process.env.FLOWPAY_MCP_RESOURCE_URL??"https://mcp.pixuno.xyz/mcp";
+const metadataUrl=new URL("/.well-known/oauth-protected-resource",mcpResource).toString();
+const authChallenge=`Bearer resource_metadata="${metadataUrl}", scope="payments:read payments:write"`;
 
 function cors(headers:Headers){
   headers.set("access-control-allow-origin","*");
@@ -18,15 +21,16 @@ function bearer(request:Request){
   return match?.[1]?.trim()??"";
 }
 
-function unauthorized(message="A FlowPay API key is required as a Bearer token"){
-  const headers=new Headers({"content-type":"application/json","www-authenticate":'Bearer realm="FlowPay MCP"'});
+function unauthorized(message="Connect your FlowPay account through the authorization page"){
+  const headers=new Headers({"content-type":"application/json","www-authenticate":authChallenge});
   cors(headers);
   return new Response(JSON.stringify({error:"unauthorized",message}),{status:401,headers});
 }
 
 async function flowpay(key:string,route:string,init:RequestInit={}){
   const headers=new Headers(init.headers);
-  headers.set("x-flowpay-api-key",key);
+  if(key.startsWith("fp_")&&!key.startsWith("fp_oauth_"))headers.set("x-flowpay-api-key",key);
+  else headers.set("authorization",`Bearer ${key}`);
   headers.set("accept","application/json");
   const response=await fetch(apiBase+route,{...init,headers,cache:"no-store"});
   const text=await response.text();
@@ -43,10 +47,16 @@ function result(value:unknown){
   return {content:[{type:"text" as const,text:JSON.stringify(value)}],structuredContent:value as Record<string,unknown>};
 }
 
-function createServer(key:string){
+function createServer(key:string,scopes:string[]){
   const server=new McpServer({name:"FlowPay",version:"1.0.0"});
+  const security=(required:string[])=>({securitySchemes:[{type:"oauth2",scopes:required}]});
+  const checkScope=(required:string)=>{
+    if(!scopes.includes(required))return {isError:true,content:[{type:"text" as const,text:"Reconnect FlowPay and approve the requested permission."}],_meta:{"mcp/www_authenticate":authChallenge}};
+    return null;
+  };
 
   server.registerTool("flowpay_integration_guide",{
+    _meta:security(["payments:read"]),
     title:"Get FlowPay integration plan",
     description:"Returns a credential-safe plan for adding FlowPay crypto checkout to a website. The API key stays in server-side environment variables and is never included in generated browser code.",
     inputSchema:{framework:z.enum(["nextjs","node","other"]).default("nextjs")},
@@ -63,6 +73,7 @@ function createServer(key:string){
   }));
 
   server.registerTool("flowpay_generate_nextjs_integration",{
+    _meta:security(["payments:read"]),
     title:"Generate Next.js FlowPay checkout files",
     description:"Generates complete Next.js App Router files. The output contains only an environment-variable reference, never the FlowPay API key.",
     inputSchema:{route:z.string().regex(/^\/[a-zA-Z0-9/_-]*$/).default("/api/flowpay/create-payment"),componentPath:z.string().default("components/FlowPayButton.tsx")},
@@ -75,6 +86,7 @@ function createServer(key:string){
   });
 
   server.registerTool("flowpay_verify_credentials",{
+    _meta:security(["payments:read"]),
     title:"Verify FlowPay credentials",
     description:"Tests the connector's stored credential against the live FlowPay API without returning the credential.",
     inputSchema:{},
@@ -82,25 +94,28 @@ function createServer(key:string){
   },async()=>{await flowpay(key,"/v1/payments?limit=1");return result({authenticated:true,api:apiBase,mode:"live",secrets_exposed:false});});
 
   server.registerTool("flowpay_list_payments",{
+    _meta:security(["payments:read"]),
     title:"List FlowPay payments",
     description:"Lists crypto payments belonging to the authenticated FlowPay merchant.",
     inputSchema:{limit:z.number().int().min(1).max(100).default(20)},
     annotations:{readOnlyHint:true,destructiveHint:false,idempotentHint:true,openWorldHint:true},
-  },async({limit})=>result(await flowpay(key,`/v1/payments?limit=${limit}`)));
+  },async({limit})=>checkScope("payments:read")??result(await flowpay(key,`/v1/payments?limit=${limit}`)));
 
   server.registerTool("flowpay_get_payment",{
+    _meta:security(["payments:read"]),
     title:"Get a FlowPay payment",
     description:"Returns one crypto payment belonging to the authenticated merchant.",
     inputSchema:{paymentId:z.string().min(1)},
     annotations:{readOnlyHint:true,destructiveHint:false,idempotentHint:true,openWorldHint:true},
-  },async({paymentId})=>result(await flowpay(key,`/v1/payments/${encodeURIComponent(paymentId)}`)));
+  },async({paymentId})=>checkScope("payments:read")??result(await flowpay(key,`/v1/payments/${encodeURIComponent(paymentId)}`)));
 
   server.registerTool("flowpay_create_payment",{
+    _meta:security(["payments:write"]),
     title:"Create a FlowPay crypto payment",
     description:"Creates a live hosted crypto checkout after the user confirms the amount, asset, network, and reference. Fiat creation is not supported.",
     inputSchema:{amount:z.string().regex(/^\d+(\.\d+)?$/),asset:z.enum(["USDC","USDT","ETH"]),chain:z.enum(["base_sepolia","ethereum_sepolia","arbitrum_sepolia","bsc_testnet"]),reference:z.string().max(160).optional(),expiresInSeconds:z.number().int().min(60).max(2592000).default(1800)},
     annotations:{readOnlyHint:false,destructiveHint:false,idempotentHint:false,openWorldHint:true},
-  },async({amount,asset,chain,reference,expiresInSeconds})=>result(await flowpay(key,"/v1/payments",{method:"POST",headers:{"content-type":"application/json","idempotency-key":crypto.randomUUID()},body:JSON.stringify({amount,asset,chain,reference,expires_in_seconds:expiresInSeconds})})));
+  },async({amount,asset,chain,reference,expiresInSeconds})=>checkScope("payments:write")??result(await flowpay(key,"/v1/payments",{method:"POST",headers:{"content-type":"application/json","idempotency-key":crypto.randomUUID()},body:JSON.stringify({amount,asset,chain,reference,expires_in_seconds:expiresInSeconds})})));
 
   return server;
 }
@@ -111,14 +126,30 @@ async function handler(request:Request){
   }
   const key=bearer(request);
   if(!key)return unauthorized();
-  try{await flowpay(key,"/v1/payments?limit=1");}
-  catch{return unauthorized("The FlowPay API key is invalid, revoked, or unavailable");}
+  let scopes:string[];
+  try{
+    if(key.startsWith("fp_oauth_")){
+      const info=await flowpay(key,"/v1/oauth/token-info") as {active:boolean;issuer:string;audience:string;scope:string};
+      if(!info.active||info.audience!==mcpResource||info.issuer!==(process.env.FLOWPAY_OAUTH_ISSUER??"https://api.pixuno.xyz").replace(/\/$/,""))return unauthorized();
+      scopes=info.scope.split(/\s+/);
+    }else{
+      await flowpay(key,"/v1/payments?limit=1");
+      scopes=["payments:read","payments:write"];
+    }
+  }catch{return unauthorized("Your FlowPay connection expired or was revoked. Connect again.");}
   const transport=new WebStandardStreamableHTTPServerTransport({sessionIdGenerator:undefined,enableJsonResponse:true,maxRequestBodySize:1_048_576});
-  const server=createServer(key);
+  const server=createServer(key,scopes);
   try{
     await server.connect(transport);
-    const response=await transport.handleRequest(request,{authInfo:{token:key,clientId:"flowpay-api-key",scopes:["payments:read","payments:create"]}});
+    const response=await transport.handleRequest(request,{authInfo:{token:key,clientId:"flowpay",scopes}});
     cors(response.headers);
+    if(response.headers.get("content-type")?.includes("application/json")){
+      const body=await response.clone().json().catch(()=>null);
+      if(Array.isArray(body?.result?.tools)){
+        body.result.tools=body.result.tools.map((tool:Record<string,any>)=>({...tool,securitySchemes:tool._meta?.securitySchemes??[{type:"oauth2",scopes:["payments:read"]}]}));
+        return new Response(JSON.stringify(body),{status:response.status,headers:response.headers});
+      }
+    }
     return response;
   }finally{
     await transport.close().catch(()=>undefined);

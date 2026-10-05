@@ -1,0 +1,44 @@
+name: Verify integrations
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  clients:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci && npm test
+        working-directory: flowpay/sdk/node
+      - run: npm ci && npm test
+        working-directory: flowpay/apps/cli
+      - run: npm ci && npm test && npm run check && npm run build:http
+        working-directory: flowpay/apps/mcp
+  frontends:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        app: [merchant, checkout]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci && npm run build
+        working-directory: flowpay/apps/${{ matrix.app }}
+  runtime:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: flowpay/backend
+      - run: sudo apt-get update && sudo apt-get install -y cmake build-essential pkg-config libssl-dev
+      - run: cargo check -p flowpay-runtime && cargo test -p flowpay-runtime --lib
+        working-directory: flowpay/backend

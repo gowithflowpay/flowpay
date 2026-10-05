@@ -66,10 +66,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/logs", get(list_logs))
         .route("/v1/overview", get(get_overview))
         .route("/v1/merchant/overview", get(get_overview))
-        .route(
-            "/v1/auth/signup",
-            post(signup),
-        )
+        .route("/v1/auth/signup", post(signup))
         .route("/v1/auth/verify", post(verify_email))
         .route("/v1/auth/resend", post(resend_code))
         .route("/v1/auth/login", post(login))
@@ -77,6 +74,48 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/auth/session", get(current_session))
         .route("/v1/auth/onboarding", post(complete_onboarding))
         .route("/v1/agent/chat", post(agent_chat))
+        .route(
+            "/v1/cli/device/start",
+            post(crate::agent_access::device_start),
+        )
+        .route(
+            "/v1/cli/device/poll",
+            post(crate::agent_access::device_poll),
+        )
+        .route(
+            "/v1/cli/device/approve",
+            post(crate::agent_access::device_approve),
+        )
+        .route(
+            "/v1/cli/device/deny",
+            post(crate::agent_access::device_deny),
+        )
+        .route(
+            "/v1/wallets/challenge",
+            post(crate::agent_access::wallet_challenge),
+        )
+        .route(
+            "/v1/wallets/verify",
+            post(crate::agent_access::wallet_verify),
+        )
+        .route("/v1/wallets", get(crate::agent_access::wallet_list))
+        .route(
+            "/v1/wallets/unlink",
+            post(crate::agent_access::wallet_unlink),
+        )
+        .route(
+            "/v1/payments/{id}/events",
+            get(crate::agent_access::payment_events),
+        )
+        .route("/.well-known/oauth-authorization-server", get(crate::oauth::metadata))
+        .route("/oauth/register", post(crate::oauth::register))
+        .route("/oauth/authorize", get(crate::oauth::authorize))
+        .route("/oauth/token", post(crate::oauth::token))
+        .route("/oauth/revoke", post(crate::oauth::revoke))
+        .route("/v1/oauth/requests/{id}", get(crate::oauth::request_details).post(crate::oauth::consent))
+        .route("/v1/oauth/token-info", get(crate::oauth::token_info))
+        .route("/v1/oauth/connections", get(crate::oauth::connections))
+        .route("/v1/oauth/connections/{id}/revoke", post(crate::oauth::disconnect))
         .with_state(state)
 }
 
@@ -242,8 +281,13 @@ async fn create_payment(
             "reference must be <= 160 characters",
         ));
     }
-    if req.asset.eq_ignore_ascii_case("NGN") || req.chain.to_ascii_lowercase().contains("flutterwave") {
-        return Err(ApiError::bad("unsupported_asset", "FlowPay accepts crypto assets only"));
+    if req.asset.eq_ignore_ascii_case("NGN")
+        || req.chain.to_ascii_lowercase().contains("flutterwave")
+    {
+        return Err(ApiError::bad(
+            "unsupported_asset",
+            "FlowPay accepts crypto assets only",
+        ));
     }
     let chain = ChainKey::from_str(&req.chain)
         .map_err(|_| ApiError::bad("unsupported_chain", "unsupported chain"))?;
@@ -422,9 +466,8 @@ async fn create_ngn_payment(
     }
     // The customer covers the platform fee and Flutterwave's cut, so the
     // merchant still nets exactly the amount they asked for.
-    let platform_fee = AtomicAmount::from_biguint(BigUint::from(
-        state.config.ngn_platform_fee_atomic,
-    ));
+    let platform_fee =
+        AtomicAmount::from_biguint(BigUint::from(state.config.ngn_platform_fee_atomic));
     let charge_total = ngn_charge_total(
         &amount,
         &platform_fee,
@@ -820,7 +863,10 @@ pub(crate) async fn find_flutterwave_transaction(
     };
     let response = state
         .http
-        .get(format!("{}/transactions", state.config.flutterwave_base_url))
+        .get(format!(
+            "{}/transactions",
+            state.config.flutterwave_base_url
+        ))
         .query(&[("tx_ref", tx_ref)])
         .timeout(StdDuration::from_secs(20))
         .bearer_auth(secret)
@@ -1148,13 +1194,15 @@ async fn public_payment_deposits(
         .await
         .map_err(map_store)?;
     let deposits = state.store.payment_deposits(p.id).await.map_err(db)?;
-    Ok(Json(json!({"data":deposits.into_iter().map(|deposit| json!({
+    Ok(Json(
+        json!({"data":deposits.into_iter().map(|deposit| json!({
         "asset": deposit.asset_symbol,
         "amount_atomic": deposit.amount.to_string(),
         "classification": deposit.classification,
         "confirmation_status": deposit.confirmation_status,
         "confirmations": deposit.confirmations
-    })).collect::<Vec<_>>()})))
+    })).collect::<Vec<_>>()}),
+    ))
 }
 
 /// Builds the crypto checkout and dashboard representation for one payment.
@@ -1309,7 +1357,10 @@ async fn create_claim(
         recovery_destination: req.recovery_destination.clone(),
         explanation: req.explanation.clone(),
     };
-    if !payment.state.can_transition_to(flowpay_domain::PaymentState::ClaimPending) {
+    if !payment
+        .state
+        .can_transition_to(flowpay_domain::PaymentState::ClaimPending)
+    {
         return Err(ApiError::new(
             StatusCode::CONFLICT,
             "claim_payment_transition_failed",
@@ -1324,7 +1375,12 @@ async fn create_claim(
             &req.recovery_destination,
             OffsetDateTime::now_utc(),
         );
-        Some((Uuid::now_v7(), challenge_chain.clone(), wallet.to_owned(), challenge))
+        Some((
+            Uuid::now_v7(),
+            challenge_chain.clone(),
+            wallet.to_owned(),
+            challenge,
+        ))
     } else {
         None
     };
@@ -1336,12 +1392,20 @@ async fn create_claim(
     sqlx::query("INSERT INTO claims (id,public_id,merchant_id,payment_id,state,expected_chain,claimed_chain,expected_asset,claimed_asset,claimed_transaction_hash,claimed_originating_wallet,recovery_destination,explanation) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)")
         .bind(claim.id.0).bind(&claim.public_id).bind(claim.merchant_id.0).bind(claim.payment_id.0).bind(claim_state(initial)).bind(claim.expected_chain.to_string()).bind(claim.claimed_chain.as_ref().map(ToString::to_string)).bind(&claim.expected_asset).bind(&claim.claimed_asset).bind(&claim.transaction_hash).bind(&claim.originating_wallet).bind(&claim.recovery_destination).bind(&claim.explanation)
         .execute(&mut *tx).await.map_err(|error| match &error { sqlx::Error::Database(dbe) if dbe.is_unique_violation() => ApiError::new(StatusCode::CONFLICT,"duplicate_claim","an active claim already exists for this payment/chain/transaction"), _ => db(error) })?;
-    let payment_version: i64 = sqlx::query_scalar("SELECT version FROM payments WHERE id=$1 FOR UPDATE")
-        .bind(payment.id.0).fetch_one(&mut *tx).await.map_err(db)?;
+    let payment_version: i64 =
+        sqlx::query_scalar("SELECT version FROM payments WHERE id=$1 FOR UPDATE")
+            .bind(payment.id.0)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(db)?;
     let changed = sqlx::query("UPDATE payments SET state='CLAIM_PENDING',version=version+1,updated_at=now() WHERE id=$1 AND version=$2")
         .bind(payment.id.0).bind(payment_version).execute(&mut *tx).await.map_err(db)?;
     if changed.rows_affected() != 1 {
-        return Err(ApiError::new(StatusCode::CONFLICT,"claim_payment_transition_failed","payment changed while the claim was being created"));
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "claim_payment_transition_failed",
+            "payment changed while the claim was being created",
+        ));
     }
     sqlx::query("INSERT INTO payment_state_transitions(payment_id,from_state,to_state,reason_code,actor_type,chain,tx_hash) VALUES($1,$2,'CLAIM_PENDING','claim_created','CUSTOMER',$3,$4)")
         .bind(payment.id.0).bind(payment.state.as_str()).bind(claimed_chain.as_ref().map(ToString::to_string)).bind(req.transaction_hash.as_deref()).execute(&mut *tx).await.map_err(db)?;
@@ -1965,15 +2029,18 @@ async fn test_webhook(
     Ok(Json(json!({"event_id":event_id,"queued":true})))
 }
 
-async fn authenticate(state: &AppState, headers: &HeaderMap) -> Result<MerchantId, ApiError> {
-    authenticate_scoped(state, headers, None).await
-}
-
-async fn authenticate_dashboard(
+pub(crate) async fn authenticate(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Result<MerchantId, ApiError> {
-    if bearer_token(headers).is_none() {
+    authenticate_scoped(state, headers, None).await
+}
+
+pub(crate) async fn authenticate_dashboard(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<MerchantId, ApiError> {
+    if bearer_token(headers).is_none_or(|token| token.starts_with("fp_oauth_")) {
         return Err(ApiError::new(
             StatusCode::FORBIDDEN,
             "dashboard_session_required",
@@ -1983,7 +2050,7 @@ async fn authenticate_dashboard(
     authenticate_scoped(state, headers, None).await
 }
 
-async fn authenticate_scoped(
+pub(crate) async fn authenticate_scoped(
     state: &AppState,
     headers: &HeaderMap,
     required_scope: Option<&str>,
@@ -1991,6 +2058,12 @@ async fn authenticate_scoped(
     // A dashboard session takes precedence over an API key: the browser holds
     // this instead, and it already resolves to exactly one merchant.
     if let Some(token) = bearer_token(headers) {
+        if token.starts_with("fp_oauth_") {
+            if required_scope.is_none() {
+                return Err(ApiError::new(StatusCode::FORBIDDEN,"insufficient_scope","this operation requires a dashboard session or API key"));
+            }
+            return crate::oauth::validate_access(state, token, required_scope).await.map(|(merchant,_)| merchant);
+        }
         let token_hash = crate::auth::hash_secret(token);
         let merchant: Option<Uuid> = sqlx::query_scalar(
             "UPDATE merchant_sessions SET last_seen_at=now() WHERE token_hash=$1 AND expires_at>now() RETURNING merchant_id",
@@ -2270,7 +2343,7 @@ fn validate_evm_address(value: &str) -> Result<(), ApiError> {
 fn claim_state(s: ClaimState) -> String {
     s.as_str().to_owned()
 }
-fn map_store(e: StoreError) -> ApiError {
+pub(crate) fn map_store(e: StoreError) -> ApiError {
     match e {
         StoreError::NotFound => ApiError::not_found(),
         StoreError::Invalid(m) => ApiError::new(StatusCode::CONFLICT, "invalid_state", m),
@@ -2282,7 +2355,7 @@ fn map_store(e: StoreError) -> ApiError {
         other => db(other),
     }
 }
-fn db<E: std::fmt::Display>(e: E) -> ApiError {
+pub(crate) fn db<E: std::fmt::Display>(e: E) -> ApiError {
     ApiError::new(
         StatusCode::INTERNAL_SERVER_ERROR,
         "database_error",
@@ -2390,8 +2463,8 @@ async fn issue_verification_code(
 ) -> Result<String, ApiError> {
     let code = crate::auth::new_verification_code();
     let code_hash = crate::auth::hash_secret(&code);
-    let expires_at = OffsetDateTime::now_utc()
-        + Duration::minutes(state.config.auth_code_ttl_minutes.max(1));
+    let expires_at =
+        OffsetDateTime::now_utc() + Duration::minutes(state.config.auth_code_ttl_minutes.max(1));
     sqlx::query(
         "INSERT INTO email_verification_codes(id,email,purpose,code_hash,expires_at) VALUES($1,$2,$3,$4,$5)",
     )
@@ -2482,7 +2555,7 @@ async fn load_merchant(state: &AppState, merchant: Uuid) -> Result<Value, ApiErr
 #[derive(Debug, Deserialize)]
 struct SignupRequest {
     email: String,
-    password: String,
+    password: Option<String>,
     business_name: String,
     contact_name: Option<String>,
 }
@@ -2494,7 +2567,9 @@ async fn signup(
     // Validate the request first so a caller sees the real problem rather than
     // a server misconfiguration.
     let email = normalize_email(&req.email)?;
-    validate_password(&req.password)?;
+    if let Some(password) = &req.password {
+        validate_password(password)?;
+    }
     let business_name = validate_business_name(&req.business_name)?;
     // Then fail before creating anything if we cannot deliver the code, so we
     // never leave an account that can never be verified.
@@ -2518,7 +2593,7 @@ async fn signup(
             "an account already exists for this email",
         ));
     }
-    let password_hash = crate::auth::hash_password(&req.password).map_err(|error| {
+    let password_hash = req.password.as_deref().map(crate::auth::hash_password).transpose().map_err(|error| {
         tracing::error!(%error, "password hashing failed");
         ApiError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -2627,11 +2702,17 @@ async fn verify_email(
         ));
     }
     let mut tx = state.store.pool().begin().await.map_err(db)?;
-    sqlx::query("UPDATE email_verification_codes SET consumed_at=now() WHERE id=$1")
+    let consumed = sqlx::query("UPDATE email_verification_codes SET consumed_at=now() WHERE id=$1 AND consumed_at IS NULL AND expires_at>now() AND attempts<5")
         .bind(code_id)
         .execute(&mut *tx)
         .await
         .map_err(db)?;
+    if consumed.rows_affected() != 1 {
+        return Err(ApiError::bad(
+            "code_expired",
+            "that code was already used or expired, request a new one",
+        ));
+    }
     let merchant: Uuid = sqlx::query_scalar(
         "UPDATE merchants SET email_verified_at=coalesce(email_verified_at,now()),updated_at=now() WHERE lower(email)=$1 RETURNING id",
     )
@@ -2757,7 +2838,9 @@ async fn login(
     if verified.is_none() {
         // The password was right, so completing verification is the next step.
         let code = issue_verification_code(&state, &email, "LOGIN").await?;
-        let delivered = send_verification_email(&state, &email, &code, "LOGIN").await.is_ok();
+        let delivered = send_verification_email(&state, &email, &code, "LOGIN")
+            .await
+            .is_ok();
         return Err(ApiError::new(
             StatusCode::FORBIDDEN,
             "email_not_verified",
@@ -2780,7 +2863,10 @@ async fn login(
     })))
 }
 
-async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<Value>, ApiError> {
+async fn logout(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
     let Some(token) = bearer_token(&headers) else {
         return Ok(Json(json!({"signed_out": true})));
     };
@@ -2798,7 +2884,9 @@ async fn current_session(
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     let merchant = authenticate_dashboard(&state, &headers).await?;
-    Ok(Json(json!({ "merchant": load_merchant(&state, merchant.0).await? })))
+    Ok(Json(
+        json!({ "merchant": load_merchant(&state, merchant.0).await? }),
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -2867,12 +2955,13 @@ async fn complete_onboarding(
     let hash = hex::encode(Sha256::digest(
         [state.config.api_key_pepper.as_bytes(), full.as_bytes()].concat(),
     ));
-    let existing: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM api_keys WHERE merchant_id=$1 AND revoked_at IS NULL")
-            .bind(merchant.0)
-            .fetch_one(state.store.pool())
-            .await
-            .map_err(db)?;
+    let existing: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM api_keys WHERE merchant_id=$1 AND revoked_at IS NULL",
+    )
+    .bind(merchant.0)
+    .fetch_one(state.store.pool())
+    .await
+    .map_err(db)?;
     let api_key = if existing > 0 {
         None
     } else {
@@ -2925,10 +3014,7 @@ async fn admin_revenue(
             "{}/api/ledger/v2/{}/accounts/{}?expand=volumes",
             state.config.formance_base_url, state.config.formance_ledger, encoded
         );
-        let mut request = state
-            .http
-            .get(url)
-            .timeout(StdDuration::from_secs(10));
+        let mut request = state.http.get(url).timeout(StdDuration::from_secs(10));
         if let Some(token) = state.config.formance_token.as_deref() {
             request = request.bearer_auth(token);
         }
@@ -3119,14 +3205,16 @@ async fn create_api_key(
             "environment must be live or test",
         ));
     }
-    let scopes = req.scopes.unwrap_or_else(|| vec![
-        "payments:read".into(),
-        "payments:write".into(),
-        "claims:read".into(),
-        "claims:write".into(),
-        "webhooks:read".into(),
-        "webhooks:write".into(),
-    ]);
+    let scopes = req.scopes.unwrap_or_else(|| {
+        vec![
+            "payments:read".into(),
+            "payments:write".into(),
+            "claims:read".into(),
+            "claims:write".into(),
+            "webhooks:read".into(),
+            "webhooks:write".into(),
+        ]
+    });
     let allowed_scopes = [
         "payments:read",
         "payments:write",
@@ -3140,7 +3228,10 @@ async fn create_api_key(
             .iter()
             .any(|scope| !allowed_scopes.contains(&scope.as_str()))
     {
-        return Err(ApiError::bad("invalid_scopes", "one or more API key scopes are unsupported"));
+        return Err(ApiError::bad(
+            "invalid_scopes",
+            "one or more API key scopes are unsupported",
+        ));
     }
     let prefix = format!(
         "fp_{}_{}",
@@ -3951,6 +4042,9 @@ mod alchemy_checkout_sync_tests {
             auth_session_ttl_hours: 24,
             auth_code_ttl_minutes: 15,
             dashboard_base_url: "https://dashboard.example.test".into(),
+            device_grant_ttl_seconds: 900,
+            device_grant_max_polls: 600,
+            wallet_challenge_ttl_seconds: 300,
         }
     }
 
