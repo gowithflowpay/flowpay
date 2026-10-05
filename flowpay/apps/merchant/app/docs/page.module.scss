@@ -42,7 +42,7 @@
 .section {scroll-margin-top:103px;border-top:1px solid var(--border);padding-top:31px;margin-top:34px;padding-bottom:5px;>p {margin:14px 0 18px}}
 .sectionTitle {display:flex;align-items:center;gap:12px;>span {font:11px ui-monospace,monospace;color:#7892ae;border:1px solid var(--border);border-radius:5px;padding:6px} h2 {margin:0;font-size:24px;letter-spacing:-.65px;font-weight:550;line-height:1.25}}
 .codeBlock {border:1px solid #d9e4f0;border-radius:8px;overflow:hidden;margin:18px 0;background:#f7faff;
-  pre {margin:0;padding:19px 20px;overflow-x:auto;color:#24588a;font:12px/1.9 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre} code {font:inherit}
+  pre {margin:0;padding:19px 20px;overflow-x:auto;background:#f7faff;border-radius:0;color:#24588a;font:12px/1.9 ui-monospace,SFMono-Regular,Consolas,monospace;white-space:pre} code {font:inherit}
 }
 .codeHeader {display:flex;justify-content:space-between;align-items:center;padding:10px 16px;border-bottom:1px solid #e2eaf3;background:#f0f5fb;color:#6984a0;font-size:11px;
   >span {display:flex;align-items:center;gap:9px} i {font-style:normal;font-family:monospace}
