@@ -16,8 +16,6 @@ Interactive requests open the HTTPS checkout in your browser. Use `--no-open` to
 
 Run `flowpay login` to sign in again automatically with the same device key. `flowpay logout` revokes the session and keeps the device key for later sign-in. Keys are scoped to the server origin and stored separately from config, encrypted with Windows DPAPI on Windows and restricted to the current user by file permissions on Unix; never share `.flowpay/*.key`. HTTP authentication is restricted to localhost. `FLOWPAY_CONFIG_DIR` isolates configurations. Existing browser accounts can optionally use `flowpay device` to approve a device. A new device cannot claim an existing account by entering its recovery email; account recovery and additional device enrollment require a separate ownership proof.
 
-This source requires the backend device-key endpoints and migration `0019_cli_device_keys.sql`. The public download must be updated together with the backend before this flow is available live.
-
 Agents can create requests, exchange checkout URLs, and monitor receipts. Wallet transfers require the payer's wallet; the CLI does not broadcast them.
 
 Documentation: https://pixuno.xyz/docs

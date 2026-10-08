@@ -4,21 +4,17 @@ import {Field} from "@base-ui/react/field";
 import {FormEvent,useState} from "react";
 import {ArrowUpRightIcon,CheckIcon,CopyIcon,PlusIcon} from "../../components/Icons";
 import {SelectField} from "./SelectField";
+import {PaymentAsset,assetOptions,networkOptions} from "../../../lib/payment-assets";
 
-const assets=[{value:"USDC",label:"USDC",detail:"USD Coin",icon:"/assets/usdc.svg"},{value:"ETH",label:"ETH",detail:"Native Ether",icon:"/assets/ethereum.svg"}];
-const networks=[{value:"base_sepolia",label:"Base",detail:"Base Sepolia",icon:"/assets/base.svg"},{value:"ethereum_sepolia",label:"Ethereum",detail:"Ethereum Sepolia",icon:"/assets/ethereum.svg"},{value:"arbitrum_sepolia",label:"Arbitrum",detail:"Arbitrum Sepolia",icon:"/assets/arbitrum.svg"},{value:"bsc_testnet",label:"BNB Chain",detail:"BSC Testnet",icon:"/assets/bsc.svg"}];
-// Native ETH is only enabled on Base and Ethereum, so the picker must not offer
-// a network where the selected asset is not an enabled payment asset.
-const nativeEthNetworks=new Set(["base_sepolia","ethereum_sepolia"]);
-
-export function PaymentLinkForm(){
+export function PaymentLinkForm({catalog}:{catalog:PaymentAsset[]}){
+  const assets=assetOptions(catalog);
   const [name,setName]=useState("");
   const [created,setCreated]=useState<{id:string;checkout_url:string}|null>(null);
   const [submitting,setSubmitting]=useState(false);
   const [error,setError]=useState("");
   const [amount,setAmount]=useState("");
-  const [asset,setAsset]=useState("USDC");
-  const allowedNetworks=asset.toUpperCase()==="ETH"?networks.filter(option=>nativeEthNetworks.has(option.value)):networks;
+  const [asset,setAsset]=useState(assets[0].value);
+  const allowedNetworks=networkOptions(catalog,asset);
   async function submit(event:FormEvent<HTMLFormElement>){
     event.preventDefault();setSubmitting(true);setError("");
     try{

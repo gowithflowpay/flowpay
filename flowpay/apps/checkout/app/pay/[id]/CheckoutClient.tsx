@@ -323,7 +323,7 @@ export function CheckoutClient({paymentId,home=false,suppressOutcome=false,initi
     {chatOpen?<div className="agent-chat-backdrop" onClick={()=>setChatOpen(false)}/>:null}
     {chatOpen?<div className="agent-chat-panel">
       <div className="agent-chat-header">
-        <img src="/assets/glossy-neon-robot-assistant-icon.png" alt="" />
+        <img src="/assets/recovery-bot.svg" alt="" />
         <div><h3>FlowPay Agent</h3><small><i />Online</small></div>
         <button type="button" onClick={()=>setChatOpen(false)} aria-label="Close chat">×</button>
       </div>
@@ -349,7 +349,7 @@ export function CheckoutClient({paymentId,home=false,suppressOutcome=false,initi
       </section>
     </div>:null}
     <button type="button" className={`agent-chat-fab${chatOpen?" agent-chat-fab-close":""}`} onClick={()=>chatOpen?setChatOpen(false):openChat()} aria-label="Support agent">
-      {chatOpen?<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>:<img src="/assets/glossy-neon-robot-assistant-icon.png" alt="" />}
+      {chatOpen?<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>:<img src="/assets/recovery-bot.svg" alt="" />}
     </button>
   </main>;
 }

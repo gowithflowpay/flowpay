@@ -36,6 +36,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/cli/auth/challenge", post(crate::cli_auth::challenge))
         .route("/v1/cli/auth/finish", post(crate::cli_auth::finish))
         .route("/health", get(health))
+        .route("/v1/payment-assets", get(payment_assets))
         .route("/v1/providers/alchemy/webhook", post(alchemy_webhook))
         .route("/v1/payments", get(list_payments).post(create_payment))
         .route("/v1/payments/{id}", get(get_payment))
@@ -103,6 +104,24 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/oauth/connections", get(crate::oauth::connections))
         .route("/v1/oauth/connections/{id}/revoke", post(crate::oauth::disconnect))
         .with_state(state)
+}
+
+async fn payment_assets(State(state): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let rows = sqlx::query("SELECT DISTINCT ON (chain, upper(symbol)) chain,symbol,decimals,token_contract FROM chain_assets WHERE enabled=true AND purpose IN ('PAYMENT','BOTH') AND upper(symbol) <> 'NGN' ORDER BY chain,upper(symbol),created_at")
+        .fetch_all(state.store.pool()).await.map_err(db)?;
+    let mut assets = Vec::new();
+    for row in rows {
+        let stored_chain: String = row.try_get("chain").map_err(internal)?;
+        let Ok(chain) = ChainKey::from_str(&stored_chain) else { continue };
+        if chain == ChainKey::Solana || !state.chains.contains_key(&chain) { continue }
+        assets.push(json!({
+            "chain": stored_chain,
+            "symbol": row.try_get::<String,_>("symbol").map_err(internal)?,
+            "decimals": row.try_get::<i16,_>("decimals").map_err(internal)?,
+            "contract": row.try_get::<Option<String>,_>("token_contract").map_err(internal)?,
+        }));
+    }
+    Ok(Json(json!({"data": assets})))
 }
 
 async fn alchemy_webhook(
