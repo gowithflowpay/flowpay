@@ -1,5 +1,5 @@
 import {NextResponse} from "next/server";
-import {api} from "../../../lib/api";
+import {api,ApiError} from "../../../lib/api";
 
 export async function POST(request:Request){
   try{
@@ -30,4 +30,9 @@ export async function POST(request:Request){
     const message=error instanceof Error?error.message:"Unable to create payment";
     return NextResponse.json({error:{message}},{status:502});
   }
+}
+
+export async function GET(request:Request){
+ try{const input=new URL(request.url).searchParams;const params=new URLSearchParams({limit:"100"});const cursor=input.get("cursor");if(cursor)params.set("cursor",cursor);return NextResponse.json(await api(`/v1/payments?${params}`));}
+ catch(error){return NextResponse.json({error:{message:error instanceof ApiError&&error.status===401?"Your session has ended. Sign in again.":"Payment records could not be loaded."}},{status:error instanceof ApiError?error.status:502});}
 }

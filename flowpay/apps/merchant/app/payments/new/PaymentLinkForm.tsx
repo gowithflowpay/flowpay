@@ -16,6 +16,7 @@ export function PaymentLinkForm(){
   const [created,setCreated]=useState<{id:string;checkout_url:string}|null>(null);
   const [submitting,setSubmitting]=useState(false);
   const [error,setError]=useState("");
+  const [amount,setAmount]=useState("");
   const [asset,setAsset]=useState("USDC");
   const allowedNetworks=asset.toUpperCase()==="ETH"?networks.filter(option=>nativeEthNetworks.has(option.value)):networks;
   async function submit(event:FormEvent<HTMLFormElement>){
@@ -32,14 +33,13 @@ export function PaymentLinkForm(){
   return <div className="simple-link-page reference-link-page payment-builder">
     <div className="simple-link-heading"><span>Crypto checkout</span><h1>Create payment</h1><p>Configure the asset and network. FlowPay generates a hosted checkout and watches the chain.</p></div>
     <div className="payment-builder-grid"><form action="/api/payments" method="post" className="simple-link-card" onSubmit={submit}>
-      <Field.Root className="simple-field" name="customer"><Field.Label>Customer or Business</Field.Label><Field.Control placeholder="Name or email (optional)"/></Field.Root>
       <SelectField name="asset" label="Asset" options={assets} onValueChange={option=>setAsset(option.value)}/>
-      <Field.Root className="simple-field amount-field" name="amount"><Field.Label>Amount</Field.Label><div><Field.Control placeholder="0.00" inputMode="decimal" min="0.000000000000000001" step="any" required/></div><Field.Error match="valueMissing">Enter an amount.</Field.Error><Field.Error match="rangeUnderflow">Enter an amount greater than zero.</Field.Error></Field.Root>
+      <Field.Root className="simple-field amount-field" name="amount"><Field.Label>Amount</Field.Label><div><Field.Control placeholder="0.00" value={amount} onChange={event=>setAmount(event.target.value)} inputMode="decimal" min="0.000000000000000001" step="any" required/></div><Field.Error match="valueMissing">Enter an amount.</Field.Error><Field.Error match="rangeUnderflow">Enter an amount greater than zero.</Field.Error></Field.Root>
       <SelectField key={asset} name="chain" label="Network" options={allowedNetworks}/>
       <Field.Root className="simple-field" name="reference"><Field.Label>Description</Field.Label><Field.Control placeholder="What is this payment for?" value={name} onChange={event=>setName(event.target.value)} maxLength={160}/></Field.Root>
       <Field.Root className="simple-field" name="expiry"><Field.Label>Expiry</Field.Label><Field.Control render={<select defaultValue="7"><option value="1">1 day</option><option value="7">7 days</option><option value="30">30 days</option></select>}/></Field.Root>
       {error?<div className="create-link-error">{error}</div>:null}<button className="simple-create-button" type="submit" disabled={submitting}>{submitting?"Generating link…":"Generate payment link"}</button>
-    </form><aside className="payment-preview"><span>Live preview</span><div className="preview-orb"><img src={assets.find(option=>option.value===asset)?.icon} alt=""/></div><small>Customer pays</small><strong>{asset}</strong><p>{allowedNetworks.length} supported network{allowedNetworks.length===1?"":"s"} available</p><ul><li><b>1</b>Share secure checkout</li><li><b>2</b>Customer sends crypto</li><li><b>3</b>FlowPay verifies on-chain</li></ul></aside></div>
+    </form><aside className="payment-preview"><span>Live preview</span><div className="preview-orb"><img src={assets.find(option=>option.value===asset)?.icon} alt=""/></div><small>Customer pays</small><strong>{amount||"0.00"} {asset}</strong><p>{allowedNetworks.length} supported network{allowedNetworks.length===1?"":"s"} available</p><ul><li><b>1</b>Share secure checkout</li><li><b>2</b>Customer sends crypto</li><li><b>3</b>FlowPay verifies on-chain</li></ul></aside></div>
     <Dialog.Root open={!!created} onOpenChange={(open)=>{if(!open)setCreated(null)}}>
       <Dialog.Portal>
         <Dialog.Backdrop className="payment-success-backdrop"/>

@@ -1,4 +1,5 @@
 "use client";
+import "../workspace.scss";
 import {usePathname} from "next/navigation";
 import type {ReactNode} from "react";
 import {ChevronDownIcon} from "./Icons";
@@ -28,7 +29,7 @@ export function AppShell({
   if(BARE_PATHS.some(path=>pathname===path||pathname.startsWith(`${path}/`))){
     return <main className="main auth-main">{children}</main>;
   }
-  return <div className="app-shell">
+  return <div className="app-shell clean-shell">
     <header className="topbar">
       <a className="logo" href="/dashboard"><span>FlowPay</span></a>
       <Sidebar/>
