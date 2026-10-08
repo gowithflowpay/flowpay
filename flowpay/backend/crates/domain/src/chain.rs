@@ -26,6 +26,7 @@ impl fmt::Display for ChainKey {
                         | "arbitrum_sepolia"
                         | "optimism_sepolia"
                         | "polygon_amoy"
+                        | "monad_testnet"
                 ) =>
             {
                 f.write_str(value)
@@ -55,6 +56,7 @@ impl FromStr for ChainKey {
             "arbitrum_sepolia" => Ok(Self::Custom("arbitrum_sepolia".to_owned())),
             "optimism_sepolia" => Ok(Self::Custom("optimism_sepolia".to_owned())),
             "polygon_amoy" => Ok(Self::Custom("polygon_amoy".to_owned())),
+            "monad_testnet" | "monad" => Ok(Self::Custom("monad_testnet".to_owned())),
             other if other.starts_with("custom:") => Ok(Self::Custom(other[7..].to_owned())),
             _ => Err(ChainParseError(value.to_owned())),
         }
@@ -81,8 +83,11 @@ mod tests {
 
     #[test]
     fn known_testnet_chain_uses_canonical_database_key() {
-        let chain = ChainKey::from_str("base_sepolia").unwrap();
-        assert_eq!(chain.to_string(), "base_sepolia");
-        assert_eq!(ChainKey::from_str(&chain.to_string()).unwrap(), chain);
+        for key in ["base_sepolia", "monad_testnet"] {
+            let chain = ChainKey::from_str(key).unwrap();
+            assert_eq!(chain.to_string(), key);
+            assert_eq!(ChainKey::from_str(&chain.to_string()).unwrap(), chain);
+        }
+        assert_eq!(ChainKey::from_str("monad").unwrap().to_string(), "monad_testnet");
     }
 }
