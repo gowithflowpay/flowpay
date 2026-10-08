@@ -33,6 +33,8 @@ use uuid::Uuid;
 
 pub fn router(state: AppState) -> Router {
     Router::new()
+        .route("/v1/cli/auth/challenge", post(crate::cli_auth::challenge))
+        .route("/v1/cli/auth/finish", post(crate::cli_auth::finish))
         .route("/health", get(health))
         .route("/v1/providers/alchemy/webhook", post(alchemy_webhook))
         .route("/v1/payments", get(list_payments).post(create_payment))
@@ -76,6 +78,11 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/auth/logout", post(logout))
         .route("/v1/auth/session", get(current_session))
         .route("/v1/auth/onboarding", post(complete_onboarding))
+        .route("/v1/auth/passkeys", get(crate::passkeys::status))
+        .route("/v1/auth/passkeys/register/start", post(crate::passkeys::register_start))
+        .route("/v1/auth/passkeys/register/finish", post(crate::passkeys::register_finish))
+        .route("/v1/auth/passkeys/login/start", post(crate::passkeys::login_start))
+        .route("/v1/auth/passkeys/login/finish", post(crate::passkeys::login_finish))
         .route("/v1/agent/chat", post(agent_chat))
         .route("/v1/cli/device/start", post(crate::agent_access::device_start))
         .route("/v1/cli/device/poll", post(crate::agent_access::device_poll))
@@ -2387,7 +2394,7 @@ fn validate_business_name(name: &str) -> Result<String, ApiError> {
 
 /// Mints a fresh session row and returns the bearer token. Only the hash is
 /// persisted, so the raw token exists solely in the response.
-async fn create_session(
+pub(crate) async fn create_session(
     state: &AppState,
     merchant: Uuid,
     user_agent: Option<String>,
@@ -2495,7 +2502,7 @@ fn merchant_json(row: &sqlx::postgres::PgRow) -> Value {
 
 const MERCHANT_COLUMNS: &str = "id,email,name,contact_name,public_id,status,email_verified_at,onboarding_completed_at,evm_settlement_address,created_at";
 
-async fn load_merchant(state: &AppState, merchant: Uuid) -> Result<Value, ApiError> {
+pub(crate) async fn load_merchant(state: &AppState, merchant: Uuid) -> Result<Value, ApiError> {
     let row = sqlx::query(&format!(
         "SELECT {MERCHANT_COLUMNS} FROM merchants WHERE id=$1"
     ))
@@ -2838,6 +2845,8 @@ struct OnboardingRequest {
     #[serde(default)]
     evm_settlement_address: Option<String>,
     contact_name: Option<String>,
+    #[serde(default)]
+    require_passkey: bool,
 }
 
 async fn complete_onboarding(
@@ -2846,6 +2855,9 @@ async fn complete_onboarding(
     Json(req): Json<OnboardingRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let merchant = authenticate(&state, &headers).await?;
+    if req.require_passkey {
+        crate::passkeys::require_registered(&state, merchant.0).await?;
+    }
     let business_name = validate_business_name(&req.business_name)?;
     let address = req
         .evm_settlement_address

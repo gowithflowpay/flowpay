@@ -10,11 +10,21 @@ export interface FlowPayConfig {
   sessionToken?: string;
   sessionExpiresAt?: number;
   merchantEmail?: string;
+  recoveryEmail?: string;
+  settlementAddress?: string;
+  pendingRegistration?: {businessName: string; contactName: string; email: string; settlementAddress: string; baseUrl: string};
   linkedWallet?: string;
-  /** Optional external signing command; CLI never stores private keys. */
+  /** Optional external signing command; CLI never stores wallet private keys. */
   signerCommand?: string;
   /** Optional spending policy for `flowpay pay`. */
   payLimit?: string;
+}
+
+export class AuthenticationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AuthenticationError";
+  }
 }
 
 const DIR = process.env.FLOWPAY_CONFIG_DIR
@@ -65,5 +75,5 @@ export function credential(config: FlowPayConfig): string {
   const key = config.apiKey;
   if (token && (!config.sessionExpiresAt || config.sessionExpiresAt > Date.now())) return token;
   if (key) return key;
-  throw new Error("not authenticated; run `flowpay init` or `flowpay login`");
+  throw new AuthenticationError("not authenticated; run `flowpay init` or `flowpay login`");
 }

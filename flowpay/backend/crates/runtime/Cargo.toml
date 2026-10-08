@@ -44,6 +44,10 @@ tower-http.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 url.workspace = true
+webauthn-rs = { version = "0.5.5", features = ["danger-allow-state-serialisation"] }
 
 [lints]
 workspace = true
+
+[dependencies.ed25519-dalek]
+version = "2.2"

@@ -4,7 +4,8 @@
 // backend payment engine stays the single source of truth.
 
 import {FlowPay, FlowPayError, classify, WaitResult, type Chain} from "@flowpay/node";
-import {loadConfig, saveConfig, clearCredentials, credential, configDir} from "./config.js";
+import {loadConfig, saveConfig, clearCredentials, credential, configDir, AuthenticationError, type FlowPayConfig} from "./config.js";
+import {deviceKey, trustedOrigin} from "./device-key.js";
 import {prompt} from "./prompt.js";
 import {EXIT, setJsonMode, out, log, fail, exitWith} from "./output.js";
 
@@ -25,7 +26,7 @@ function parse(argv: string[]): Parsed {
         flags[body.slice(0, eq)] = body.slice(eq + 1);
       } else {
         const next = argv[i + 1];
-        const valueFlags = new Set(["business-name", "contact-name", "settlement-address", "email", "code", "address", "description", "reference", "chain", "asset", "timeout", "interval", "label", "name", "scopes", "limit", "signer", "base-url", "expires-in"]);
+        const valueFlags = new Set(["business-name", "contact-name", "settlement-address", "email", "recovery-email", "code", "address", "nonce", "signature", "description", "reference", "chain", "asset", "timeout", "interval", "label", "name", "scopes", "limit", "signer", "base-url", "expires-in"]);
         if (next !== undefined && !next.startsWith("--") && valueFlags.has(body)) {
           flags[body] = next;
           i++;
@@ -40,8 +41,9 @@ function parse(argv: string[]): Parsed {
   return {args, flags};
 }
 
-function client(baseUrl?: string, keyOverride?: string): FlowPay {
+function client(baseUrl?: string, keyOverride?: string, unauthenticated = false): FlowPay {
   const config = loadConfigSync() as Record<string, unknown>;
+  if (!unauthenticated && !keyOverride) credential(config as FlowPayConfig);
   return new FlowPay({
     apiKey: keyOverride ?? (config.apiKey as string | undefined),
     sessionToken: !keyOverride && typeof config.sessionToken === "string" && (!config.sessionExpiresAt || Number(config.sessionExpiresAt) > Date.now()) ? config.sessionToken : undefined,
@@ -77,6 +79,10 @@ async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   const {args, flags} = parse(argv);
   if (flags.json) setJsonMode(true);
+  if (flags.version) {
+    const manifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+    return out({version: manifest.version, node: process.version}, `FlowPay CLI ${manifest.version}\nNode.js ${process.version}`);
+  }
   if (flags.help) return printHelp();
   const config = loadConfigSync();
 
@@ -88,6 +94,8 @@ async function main(): Promise<void> {
       return await cmdRegister(flags);
     case "init":
       return await cmdInit(flags);
+    case "device":
+      return await cmdDevice(flags);
     case "login":
       return await cmdLogin(flags);
     case "account":
@@ -121,9 +129,10 @@ function printHelp(): void {
 Usage: flowpay <command> [subcommand] [arguments] [--json]
 
 Setup:
-  flowpay register                   Register interactively and verify your email
-  flowpay login                      Sign in with your email and a one-time code
-  flowpay init                       Link this device to your FlowPay account (device flow)
+  flowpay init                       Signup wizard: business, recovery email, settlement wallet
+  flowpay register                   The same terminal signup, or use registration flags
+  flowpay login                      Sign in automatically with this device key
+  flowpay device                     Approve this device from an existing account
   flowpay account status             Show the current account and credential
   flowpay logout                     Forget local credentials
 
@@ -149,6 +158,9 @@ Exit codes:
 Environment:
   FLOWPAY_API_URL      Backend base URL (default https://api.pixuno.xyz)
   FLOWPAY_CONFIG_DIR   Override config directory (default ~/.flowpay)
+
+Diagnostics:
+  flowpay --version                  Print the installed CLI and Node.js versions
 `;
   process.stdout.write(`${text}\n`);
 }
@@ -166,6 +178,8 @@ function mapWaitOutcome(wait: WaitResult): number {
   if (wait.outcome === "success") return EXIT.ok;
   if (wait.outcome === "recoverable") return EXIT.recoverable;
   if (wait.outcome === "timeout") return EXIT.timeout;
+  if (wait.payment?.status === "EXPIRED") return EXIT.expired;
+  if (wait.payment?.status === "CANCELLED") return EXIT.cancelled;
   return EXIT.generic;
 }
 
@@ -184,8 +198,8 @@ function paymentView(p: Awaited<ReturnType<FlowPay["payments"]["get"]>>): Record
   };
 }
 
-async function cmdInit(flags: Record<string, string | boolean>): Promise<void> {
-  const api = client(typeof flags["base-url"] === "string" ? flags["base-url"] : undefined);
+async function cmdDevice(flags: Record<string, string | boolean>): Promise<void> {
+  const api = client(typeof flags["base-url"] === "string" ? flags["base-url"] : undefined, undefined, true);
   const grant = await api.cli.start();
   log("Open this URL and approve the device:");
   log(`  ${grant.verification_uri}`);
@@ -196,7 +210,7 @@ async function cmdInit(flags: Record<string, string | boolean>): Promise<void> {
   let intervalMs = grant.interval * 1000;
   for (;;) {
     if (Date.now() >= deadline) {
-      fail(new Error("device grant expired; run `flowpay init` again"));
+      fail(new Error("device grant expired; run `flowpay device` again"));
     }
     await new Promise(r => setTimeout(r, intervalMs));
     let result;
@@ -229,6 +243,10 @@ async function cmdInit(flags: Record<string, string | boolean>): Promise<void> {
   }
 }
 
+async function cmdInit(flags: Record<string, string | boolean>): Promise<void> {
+  return cmdRegister(flags);
+}
+
 async function openBrowser(value: string): Promise<void> {
   const url=new URL(value);
   if(url.protocol!=="https:"||url.username||url.password){log("Open the printed checkout URL manually.");return;}
@@ -248,56 +266,67 @@ async function authRequest(base: string, action: string, payload: unknown, token
     signal: AbortSignal.timeout(30000),
   });
   const body = await response.json().catch(() => ({})) as any;
-  if (!response.ok) throw new Error(body?.error?.message ?? `Login failed (${response.status})`);
+  if (!response.ok) throw new FlowPayError(response.status, body?.error?.code ?? "auth_error", body?.error?.message ?? `Login failed (${response.status})`);
   return body;
 }
 
-async function cmdLogin(flags: Record<string, string | boolean>): Promise<void> {
-  if(flags.password)throw new Error("FlowPay CLI uses email codes. Run flowpay login.");
-  const email = (typeof flags.email === "string" ? flags.email : await prompt("Email: ")).trim().toLowerCase();
-  if (!email) throw new Error("email is required");
-  const base = baseUrl(flags);
-  let code = typeof flags.code === "string" ? flags.code.trim() : "";
-  if (!code) {
-    if (!process.stdin.isTTY) throw new Error("Email login requires a terminal; use --code with an existing email code");
-    const sent = await authRequest(base, "resend", {email, purpose: "LOGIN"});
-    if (sent.sent === false) throw new Error("The email code could not be delivered");
-    log(`Check ${email} for your sign-in code.`);
-    code = (await prompt("Email code: ", true)).trim();
-  }
-  if (!/^\d{6}$/.test(code)) throw new Error("Enter the six-digit email code");
-  const body = await authRequest(base, "verify", {email, code});
+async function keyRequest(base: string, action: string, payload: unknown): Promise<any> {
+  trustedOrigin(base);
+  const response = await fetch(`${base}/v1/cli/auth/${action}`, {
+    method: "POST", headers: {"content-type": "application/json"}, body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(30000), redirect: "error",
+  });
+  const body = await response.json().catch(() => ({})) as any;
+  if (!response.ok) throw new FlowPayError(response.status, body?.error?.code ?? "device_auth_failed", body?.error?.message ?? `Device authentication failed (${response.status})`);
+  return body;
+}
+
+async function keyAuthenticate(base: string, purpose: "REGISTER" | "LOGIN", profile?: Record<string, string>) {
+  const key = await deviceKey(base, purpose === "REGISTER");
+  const challenge = await keyRequest(base, "challenge", {public_key: key.publicKey, purpose, profile});
+  if (typeof challenge.id !== "string" || typeof challenge.message !== "string" || !challenge.message.startsWith(`FlowPay CLI authentication\n${purpose}\n`)) throw new Error("Invalid device challenge");
+  const body = await keyRequest(base, "finish", {id: challenge.id, signature: key.sign(challenge.message)});
   if (typeof body.session_token !== "string" || !body.session_token) throw new Error("FlowPay did not return a session");
-  await saveConfig({apiKey: undefined, sessionToken: body.session_token, sessionExpiresAt: body.expires_at, merchantEmail: email, baseUrl: base});
-  out({logged_in: true, merchant_email: email}, `Signed in as ${email}`);
+  await saveConfig({baseUrl: base, apiKey: undefined, sessionToken: body.session_token, sessionExpiresAt: body.expires_at,
+    merchantEmail: body.merchant?.email, recoveryEmail: body.merchant?.email, settlementAddress: body.merchant?.settlement_address, pendingRegistration: undefined});
+  return body;
+}
+
+function rejectLegacyAuth(flags: Record<string, string | boolean>) {
+  if (flags.password || flags.code) throw new Error("CLI authentication uses this device key; passwords and email codes are not used");
+}
+
+async function cmdLogin(flags: Record<string, string | boolean>): Promise<void> {
+  rejectLegacyAuth(flags);
+  const body = await keyAuthenticate(baseUrl(flags), "LOGIN");
+  out({logged_in: true, merchant_email: body.merchant?.email}, "Signed in with this device key");
 }
 
 async function cmdRegister(flags: Record<string, string | boolean>): Promise<void> {
-  const field=async(name:string,label:string)=>typeof flags[name]==="string"?String(flags[name]).trim():(await prompt(label)).trim();
-  const businessName=await field("business-name","Business name: ");
-  const contactName=await field("contact-name","Your name: ");
-  const email=(await field("email","Email: ")).toLowerCase();
-  const settlementAddress=await field("settlement-address","Settlement wallet (0x...): ");
-  if(!businessName||!email)throw new Error("Business name and email are required");
-  if(!/^0x[a-fA-F0-9]{40}$/.test(settlementAddress))throw new Error("Enter a valid EVM settlement wallet address");
+  rejectLegacyAuth(flags);
+  const flag=(name:string)=>typeof flags[name]==="string"?String(flags[name]).trim():"";
   const base=baseUrl(flags);
-  const created=await authRequest(base,"signup",{business_name:businessName,contact_name:contactName||undefined,email});
-  if(created.email_sent===false)throw new Error("Your account was created but email delivery failed. Run flowpay login to request another code.");
-  log(`Check ${email} for your verification code.`);
-  const code=(typeof flags.code==="string"?flags.code:await prompt("Email code: ",true)).trim();
-  if(!/^\d{6}$/.test(code))throw new Error("Enter the six-digit email code");
-  const verified=await authRequest(base,"verify",{email,code});
-  if(typeof verified.session_token!=="string"||!verified.session_token)throw new Error("FlowPay did not return a session");
-  await saveConfig({apiKey:undefined,sessionToken:verified.session_token,sessionExpiresAt:verified.expires_at,merchantEmail:email,baseUrl:base});
-  await authRequest(base,"onboarding",{business_name:businessName,contact_name:contactName||undefined,evm_settlement_address:settlementAddress},verified.session_token);
-  out({registered:true,merchant_email:email},`Account registered and email verified.\nSigned in as ${email}\nReady: flowpay request 20 usdc eth`);
+  trustedOrigin(base);
+  const interactive=Boolean(process.stdin.isTTY)&&!flags.json;
+  if(flag("email")&&flag("recovery-email")&&flag("email").toLowerCase()!==flag("recovery-email").toLowerCase())throw new Error("Use one recovery email; --email and --recovery-email must match");
+  for(const name of ["business-name","contact-name","email","recovery-email","settlement-address"]){if(flags[name]===true)throw new Error(`--${name} requires a value`);}
+  const field=async(value:string,label:string,valid:(v:string)=>boolean,message:string):Promise<string>=>{
+    if(value){if(!valid(value))throw new Error(message);return value;}
+    if(!interactive)throw new Error(message+". Run flowpay init in a terminal or provide --business-name, --recovery-email and --settlement-address.");
+    for(;;){const answer=(await prompt(label)).trim();if(valid(answer))return answer;log(message);}
+  };
+  const businessName=await field(flag("business-name"),"Business name: ",value=>value.length>0&&value.length<=120,"Business name must be 1-120 characters");
+  const email=(await field(flag("recovery-email")||flag("email"),"Recovery email: ",value=>value.length<=254&&/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value),"Enter a valid recovery email address")).toLowerCase();
+  const settlementAddress=await field(flag("settlement-address"),"Settlement wallet (0x...): ",value=>/^0x[a-fA-F0-9]{40}$/.test(value)&&!/^0x0{40}$/.test(value),"Enter a valid EVM settlement wallet address");
+  const body=await keyAuthenticate(base,"REGISTER",{business_name:businessName,email,settlement_address:settlementAddress,contact_name:flag("contact-name")});
+  out({registered:true,initialized:true,merchant_email:body.merchant?.email,recovery_email:body.merchant?.email,settlement_wallet:body.merchant?.settlement_address},`Account ready. Device key configured.\nRecovery email: ${body.merchant?.email}\nSettlement wallet: ${body.merchant?.settlement_address}\nReady: flowpay request 20 usdc eth`);
 }
 
 async function cmdAccountStatus(): Promise<void> {
   const config = loadConfigSync() as Record<string, unknown>;
   const hasKey = Boolean(config.apiKey ?? config.sessionToken);
   if (!hasKey) {
-    fail(new Error("not authenticated; run `flowpay init` or `flowpay login`"));
+    fail(new AuthenticationError("not authenticated; run `flowpay init` or `flowpay login`"));
   }
   const api = client();
   try {
@@ -311,7 +340,7 @@ async function cmdAccountStatus(): Promise<void> {
     out(payload, humanAccountStatus(payload));
   } catch (e) {
     if (e instanceof FlowPayError && e.status === 401) {
-      fail(new Error("credential rejected by the API; run `flowpay init` or `flowpay login` again"));
+      fail(new AuthenticationError("credential rejected by the API; run `flowpay init` or `flowpay login` again"));
     }
     throw e;
   }
@@ -328,8 +357,12 @@ ${wallets}`;
 }
 
 async function cmdLogout(): Promise<void> {
+  const config = await loadConfig();
+  if (config.sessionToken) {
+    await authRequest(config.baseUrl ?? "https://api.pixuno.xyz", "logout", {}, config.sessionToken);
+  }
   await clearCredentials();
-  log("Credentials removed.");
+  out({signed_out: true}, "Signed out. Device key kept for future sign-in.");
 }
 
 async function cmdWallet(subcommand: string | undefined, flags: Record<string, string | boolean>): Promise<void> {

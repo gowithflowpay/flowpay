@@ -1,3 +1,4 @@
+import {createPublicKey, verify, randomBytes} from "node:crypto";
 import test from "node:test";
 import assert from "node:assert/strict";
 import {execFileSync, spawnSync, spawn} from "node:child_process";
@@ -21,38 +22,58 @@ function runAsync(args, env) {
   });
 }
 
-test("email login persists the API and sends the session as Bearer without exposing it", async () => {
-  const requests = [];
-  const server = createServer(async (request, response) => {
-    let text = "";
-    for await (const chunk of request) text += chunk;
-    requests.push({url: request.url, headers: request.headers, body: text ? JSON.parse(text) : null});
-    response.setHeader("content-type", "application/json");
-    response.end(JSON.stringify(request.url === "/v1/auth/verify"
-      ? {session_token: "session-secret", expires_at: Date.now() + 60000}
-      : {data: []}));
+test("first-user signup and returning login use signed challenges with no UI, password or OTP", async () => {
+  const requests=[]; const challenges=new Map(); let publicKey;
+  const server=createServer(async(request,response)=>{
+    let text=""; for await(const chunk of request)text+=chunk;
+    const body=text?JSON.parse(text):null;
+    requests.push({url:request.url,body,headers:request.headers});
+    response.setHeader("content-type","application/json");
+    if(request.url==="/v1/cli/auth/challenge") {
+      publicKey=body.public_key;
+      const id=randomBytes(16).toString("hex");
+      const message=`FlowPay CLI authentication\n${body.purpose}\n${id}\n${randomBytes(32).toString("hex")}\n${JSON.stringify(body.profile)}`;
+      challenges.set(id,{message,key:publicKey});
+      return response.end(JSON.stringify({id,message}));
+    }
+    if(request.url==="/v1/cli/auth/finish") {
+      const challenge=challenges.get(body.id); challenges.delete(body.id);
+      assert.equal(verify(null,Buffer.from(challenge.message),createPublicKey({format:"jwk",key:{kty:"OKP",crv:"Ed25519",x:challenge.key}}),Buffer.from(body.signature,"base64url")),true);
+      return response.end(JSON.stringify({session_token:"device-session-secret",expires_at:Date.now()+60000,merchant:{email:"owner@example.test",settlement_address:"0x1111111111111111111111111111111111111111"}}));
+    }
+    if(request.url==="/v1/auth/logout") return response.end("{}");
+    response.end(JSON.stringify({data:[]}));
   });
-  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "flowpay-login-"));
-  const base = `http://127.0.0.1:${server.address().port}`;
+  await new Promise(resolve=>server.listen(0,"127.0.0.1",resolve));
+  const directory=fs.mkdtempSync(path.join(os.tmpdir(),"flowpay-key-"));
+  const base=`http://127.0.0.1:${server.address().port}`;const env={FLOWPAY_CONFIG_DIR:directory};
   try {
-    const env = {FLOWPAY_CONFIG_DIR: directory, FLOWPAY_API_URL: ""};
-    delete env.FLOWPAY_API_URL;
-    const result = await runAsync(["login", "--email", "YOU@example.com", "--code", "123456", "--base-url", base, "--json"], env);
-    assert.equal(result.status, 0, result.stderr);
-    assert.deepEqual(requests[0].body, {email: "you@example.com", code: "123456"});
-    assert.doesNotMatch(result.stdout + result.stderr, /session-secret/);
-    const config = JSON.parse(fs.readFileSync(path.join(directory, "config.json"), "utf8"));
-    assert.equal(config.baseUrl, base);
-    const status = await runAsync(["account", "status", "--json"], env);
-    assert.equal(status.status, 0, status.stderr);
-    assert.equal(requests[1].headers.authorization, "Bearer session-secret");
-    assert.equal(requests[1].headers["x-flowpay-api-key"], undefined);
-  } finally {
-    server.closeAllConnections();
-    await new Promise(resolve => server.close(resolve));
-    fs.rmSync(directory, {recursive: true, force: true});
-  }
+    const missing=await runAsync(["login","--base-url",base,"--json"],env);
+    assert.equal(missing.status,6);assert.equal(requests.length,0);
+    const signup=await runAsync(["init","--business-name","Test Store","--recovery-email","owner@example.test","--settlement-address","0x1111111111111111111111111111111111111111","--base-url",base,"--json"],env);
+    assert.equal(signup.status,0,signup.stderr+signup.stdout);
+    const registeredKey=publicKey;
+    assert.equal(requests[0].body.purpose,"REGISTER");assert.equal(requests[0].body.profile.email,"owner@example.test");
+    assert.equal(requests[0].body.profile.settlement_address,"0x1111111111111111111111111111111111111111");
+    assert.deepEqual(requests.map(r=>r.url),["/v1/cli/auth/challenge","/v1/cli/auth/finish"]);
+    const keyFile=fs.readdirSync(directory).find(name=>name.endsWith(".key"));assert.ok(keyFile);
+    const keyContent=fs.readFileSync(path.join(directory,keyFile),"utf8");assert.match(keyContent,process.platform==="win32"?/^DPAPI:/ : /PRIVATE KEY/);
+    const config=JSON.parse(fs.readFileSync(path.join(directory,"config.json"),"utf8"));assert.equal(config.baseUrl,base);
+    assert.doesNotMatch(signup.stdout+signup.stderr,/device-session-secret|PRIVATE KEY/);
+    const status=await runAsync(["account","status","--json"],env);assert.equal(status.status,0,status.stderr);
+    assert.equal(requests[2].headers.authorization,"Bearer device-session-secret");
+    const logout=await runAsync(["logout","--json"],env);assert.equal(logout.status,0,logout.stderr);
+    assert.equal(fs.readFileSync(path.join(directory,keyFile),"utf8"),keyContent);
+    const login=await runAsync(["login","--base-url",base,"--json"],env);assert.equal(login.status,0,login.stderr+login.stdout);
+    assert.equal(requests.at(-2).body.purpose,"LOGIN");assert.equal(requests.at(-2).body.public_key,registeredKey);
+    const requestCount=requests.length;
+    const otherOrigin=await runAsync(["login","--base-url",base.replace("127.0.0.1","localhost"),"--json"],env);
+    assert.equal(otherOrigin.status,6);assert.equal(requests.length,requestCount);
+    const insecure=await runAsync(["login","--base-url","http://api.example.test","--json"],env);
+    assert.notEqual(insecure.status,0);assert.match(insecure.stdout,/HTTPS/);assert.equal(requests.length,requestCount);
+    for(const r of requests){assert.equal(r.body?.password,undefined);assert.equal(r.body?.code,undefined);assert.doesNotMatch(JSON.stringify(r.body),/PRIVATE KEY/);}
+    const forbidden=await runAsync(["login","--code","123456","--json"],env);assert.notEqual(forbidden.status,0);
+  } finally {server.closeAllConnections();await new Promise(resolve=>server.close(resolve));fs.rmSync(directory,{recursive:true,force:true});}
 });
 
 test("device initialization starts without existing credentials", async () => {
@@ -67,7 +88,7 @@ test("device initialization starts without existing credentials", async () => {
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "flowpay-device-"));
   try {
-    const result = await runAsync(["init", "--base-url", `http://127.0.0.1:${server.address().port}`, "--json"], {FLOWPAY_CONFIG_DIR: directory});
+    const result = await runAsync(["device", "--base-url", `http://127.0.0.1:${server.address().port}`, "--json"], {FLOWPAY_CONFIG_DIR: directory});
     assert.equal(started, true);
     assert.notEqual(result.status, 0);
     assert.match(result.stdout, /denied/);
@@ -76,28 +97,6 @@ test("device initialization starts without existing credentials", async () => {
     await new Promise(resolve => server.close(resolve));
     fs.rmSync(directory, {recursive: true, force: true});
   }
-});
-
-test("register verifies email and completes wallet onboarding without a password", async () => {
-  const requests=[];
-  const server=createServer(async(request,response)=>{
-    let text="";for await(const chunk of request)text+=chunk;
-    requests.push({url:request.url,body:JSON.parse(text),authorization:request.headers.authorization});
-    response.setHeader("content-type","application/json");
-    response.end(JSON.stringify(request.url==="/v1/auth/verify"?{session_token:"registration-session",expires_at:Date.now()+60000}:{email_sent:true,merchant:{onboarding_completed:true}}));
-  });
-  await new Promise(resolve=>server.listen(0,"127.0.0.1",resolve));
-  const directory=fs.mkdtempSync(path.join(os.tmpdir(),"flowpay-register-"));
-  try{
-    const result=await runAsync(["register","--business-name","Test Store","--contact-name","Test Owner","--email","owner@example.test","--settlement-address","0x1111111111111111111111111111111111111111","--code","123456","--base-url",`http://127.0.0.1:${server.address().port}`,"--json"],{FLOWPAY_CONFIG_DIR:directory});
-    assert.equal(result.status,0,result.stderr);
-    assert.equal(requests[0].url,"/v1/auth/signup");
-    assert.equal(requests[0].body.password,undefined);
-    assert.equal(requests[1].url,"/v1/auth/verify");
-    assert.equal(requests[2].url,"/v1/auth/onboarding");
-    assert.equal(requests[2].authorization,"Bearer registration-session");
-    assert.doesNotMatch(result.stdout+result.stderr,/registration-session/);
-  }finally{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));fs.rmSync(directory,{recursive:true,force:true});}
 });
 
 test("positional eth request prints shareable details and confirms receipt",async()=>{

@@ -24,6 +24,7 @@ export function AppShell({
   children:ReactNode;
 }){
   const pathname=usePathname();
+  if(pathname==="/"||pathname==="/docs"||pathname.startsWith("/docs/"))return <>{children}</>;
   if(BARE_PATHS.some(path=>pathname===path||pathname.startsWith(`${path}/`))){
     return <main className="main auth-main">{children}</main>;
   }

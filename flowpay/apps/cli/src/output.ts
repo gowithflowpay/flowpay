@@ -1,4 +1,5 @@
 import {FlowPayError} from "@flowpay/node";
+import {AuthenticationError} from "./config.js";
 
 export const EXIT: Record<string, number> = {
   ok: 0,
@@ -46,6 +47,7 @@ export function fail(error: unknown): never {
     else if (error.code === "payment_cancelled" || error.code === "cancelled") exitCode = EXIT.cancelled;
     payload = {error: {code: error.code, message: error.message, request_id: error.requestId}};
   } else if (error instanceof Error) {
+    if (error instanceof AuthenticationError) exitCode = EXIT.auth;
     payload = {error: {code: "cli_error", message: error.message}};
   } else {
     payload = {error: {code: "cli_error", message: String(error)}};

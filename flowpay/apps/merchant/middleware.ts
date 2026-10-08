@@ -4,6 +4,7 @@ import {ONBOARDED_COOKIE,SESSION_COOKIE} from "./lib/cookies";
 // "/" is the public marketing page, so a signed-out visitor can read it.
 // Checkout and claim pages are public too: they are what a customer opens.
 const PUBLIC_PATHS=[
+  "/docs",
   "/api/auth",
   "/api/payment",
   "/api/claims",
