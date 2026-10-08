@@ -203,6 +203,7 @@ export function CheckoutClient({paymentId,home=false,suppressOutcome=false,initi
   },[payment]);
 
   const time=useMemo(()=>`${String(Math.floor(remaining/60)).padStart(2,"0")}:${String(remaining%60).padStart(2,"0")}`,[remaining]);
+  const clockParts=[...(remaining>=86400?[{value:String(Math.floor(remaining/86400)),label:"days"}]:[]),{value:String(Math.floor(remaining/3600)%24).padStart(2,"0"),label:"hrs"},{value:String(Math.floor(remaining/60)%60).padStart(2,"0"),label:"min"},{value:String(remaining%60).padStart(2,"0"),label:"sec"}];
   const countdownPercent=windowTotal>0?Math.min(100,Math.max(0,Math.round(((windowTotal-remaining)/windowTotal)*100))):0;
 
   const copy=async()=>{
@@ -290,7 +291,7 @@ export function CheckoutClient({paymentId,home=false,suppressOutcome=false,initi
         {isBankTransfer?null:<div className="reference-warning"><InfoIcon/><p><strong>{`Use ${network.label} network only`}</strong><span>Other assets or networks may be lost.</span></p></div>}
         {isBankTransfer?<div className="ngn-countdown" role="timer"><div className="ngn-ring" style={{background:`conic-gradient(#6553e9 ${countdownPercent}%,#e9e6f4 0)`}}><span>{time}</span></div><div className="ngn-countdown-copy"><strong>{remaining>0?"Complete this transfer before time runs out":"This payment window has closed"}</strong><span>Keep the exact amount — confirmation is automatic.</span></div></div>:null}
         <span className="payment-status-label">{isBankTransfer?"Transfer status":"Payment status"}</span>
-        <div className={`reference-status status-${status.toLowerCase()}`} role="status" aria-live="polite"><span>{isDone?<CheckIcon/>:<ClockIcon/>}</span><p><strong>{statusCopy[0]}</strong><small>{statusCopy[1]}</small></p>{isBankTransfer?null:<b>{time} left</b>}</div>
+        <div className={`reference-status status-${status.toLowerCase()}`} role="status" aria-live="polite"><span>{isDone?<CheckIcon/>:<ClockIcon/>}</span><p><strong>{statusCopy[0]}</strong><small>{statusCopy[1]}</small></p>{isBankTransfer||terminal.has(status)||isDone?null:<div className={`checkout-countdown${remaining<=300?" checkout-countdown-urgent":""}`} role="timer" aria-live="off" aria-label={remaining>0?`${Math.floor(remaining/86400)} days, ${Math.floor(remaining/3600)%24} hours, ${Math.floor(remaining/60)%60} minutes and ${remaining%60} seconds remaining`:"Payment window closed"}>{remaining>0?<><span className="checkout-countdown-label">Time left</span><div className="checkout-countdown-digits">{clockParts.map(part=><span className="checkout-countdown-unit" key={part.label}><b>{part.value}</b><small>{part.label}</small></span>)}</div></>:<span className="checkout-countdown-closed">Window closed</span>}</div>}</div>
         <div className="secure-copy"><ShieldIcon/><p><strong>Your payment is secure and encrypted.</strong><span>We never store your funds.</span></p></div>
         <div className="summary-rule"/>
         <div className="expiry-copy"><ClockIcon/><p><span>Payment expires in</span><strong>{time}</strong></p></div>
