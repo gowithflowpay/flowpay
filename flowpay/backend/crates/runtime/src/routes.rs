@@ -365,6 +365,11 @@ async fn create_payment(
             "configured EVM chains do not produce one recoverable CREATE3 checkout address",
         ));
     }
+    let initial_monitor_height = if !state.config.alchemy_webhook_ids.contains_key(&chain) {
+        Some(runtime.adapter.health().await.map_err(|_| ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE, "chain_unavailable", "payment network is temporarily unavailable",
+        ))?.latest_height.saturating_sub(3))
+    } else { None };
     register_checkout_with_alchemy(&state, &address).await?;
     let expires = OffsetDateTime::now_utc()
         + Duration::seconds(req.expires_in_seconds.unwrap_or(1800).clamp(60, 2_592_000));
@@ -395,6 +400,9 @@ async fn create_payment(
         .create_payment(&payment, salt, &checkout_addresses, "EVM_CREATE3_V1")
         .await
         .map_err(db)?;
+    if let Some(height) = initial_monitor_height {
+        state.store.set_monitor_cursor(payment_id, &chain, height, None).await.map_err(db)?;
+    }
     let merchant_name: String = sqlx::query_scalar("SELECT name FROM merchants WHERE id=$1")
         .bind(merchant.0)
         .fetch_one(state.store.pool())

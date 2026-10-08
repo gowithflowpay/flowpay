@@ -18,6 +18,18 @@ use time::OffsetDateTime;
 use tracing::{error, info, warn};
 
 pub fn spawn_periodic(state: AppState) {
+    for chain in state.chains.keys().filter(|chain| !state.config.alchemy_webhook_ids.contains_key(*chain)) {
+        let mut monitor = state.clone();
+        monitor.chains.retain(|key, _| key == chain);
+        tokio::spawn(async move {
+            loop {
+                if let Err(error) = payment_monitor_tick(&monitor).await {
+                    warn!(error=%error, "RPC payment monitoring failed");
+                }
+                tokio::time::sleep(StdDuration::from_secs(3)).await;
+            }
+        });
+    }
     let settlement = state.clone();
     tokio::spawn(async move {
         loop {
@@ -186,6 +198,25 @@ async fn handle_command(
 }
 
 async fn payment_monitor_tick(state: &AppState) -> anyhow::Result<()> {
+    let mut last_error = None;
+    for chain in state.chains.keys() {
+        let key = format!("payment-monitor:{chain}");
+        let Some(holder) = try_acquire_service_lease(state, &key, 180).await? else { continue };
+        let heartbeat = spawn_lease_heartbeat(state.clone(), &key, holder.clone(), 180);
+        let mut monitor = state.clone();
+        monitor.chains.retain(|configured, _| configured == chain);
+        let result = payment_monitor_tick_inner(&monitor).await;
+        heartbeat.abort();
+        release_service_lease(state, &key, &holder).await;
+        if let Err(error) = result {
+            warn!(%chain, error=%error, "chain payment monitoring failed");
+            last_error = Some(error);
+        }
+    }
+    match last_error { Some(error) => Err(error), None => Ok(()) }
+}
+
+async fn payment_monitor_tick_inner(state: &AppState) -> anyhow::Result<()> {
     for (chain, runtime) in &state.chains {
         let health = match runtime.adapter.health().await {
             Ok(v) => v,
@@ -1443,10 +1474,11 @@ async fn try_acquire_service_lease(
 
 fn spawn_lease_heartbeat(
     state: AppState,
-    key: &'static str,
+    key: &str,
     holder: String,
     ttl_seconds: i64,
 ) -> tokio::task::JoinHandle<()> {
+    let key = key.to_owned();
     tokio::spawn(async move {
         let interval = (ttl_seconds.max(30) / 3) as u64;
         loop {
@@ -1454,7 +1486,7 @@ fn spawn_lease_heartbeat(
             let result = sqlx::query(
                 "UPDATE service_leases SET expires_at=now()+make_interval(secs => $3),updated_at=now() WHERE lease_key=$1 AND holder_id=$2",
             )
-            .bind(key)
+            .bind(&key)
             .bind(&holder)
             .bind(ttl_seconds)
             .execute(state.store.pool())
