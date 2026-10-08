@@ -354,7 +354,7 @@ html[data-theme="dark"] .simple-field>[data-field-control],html[data-theme="dark
   .topbar{grid-template-columns:auto 1fr auto;gap:0}
   .mobile-menu-button{order:initial;display:inline-flex;align-items:center;gap:7px;width:auto;height:40px;margin:0;padding:0 12px;border:1px solid rgba(136,123,205,.28);border-radius:999px;background:linear-gradient(135deg,rgba(125,96,255,.16),rgba(255,255,255,.8));color:#33267e;box-shadow:0 8px 26px rgba(65,46,140,.11);font-size:11px;font-weight:750;letter-spacing:.02em}
   .mobile-menu-button svg{width:17px;height:17px}
-  .mobile-menu-button:hover{border-color:rgba(111,83,239,.52);background:#fff}
+
   .topbar .logo{justify-self:center;font-size:22px}
   .topbar-actions{gap:8px}
   .navigation-backdrop{position:fixed;inset:0;z-index:90;background:rgba(7,7,18,.42);backdrop-filter:blur(9px);-webkit-backdrop-filter:blur(9px)}
