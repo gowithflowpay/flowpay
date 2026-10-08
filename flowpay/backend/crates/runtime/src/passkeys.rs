@@ -26,6 +26,93 @@ fn internal(error: impl std::fmt::Display) -> ApiError {
 fn ceremony_error(_: impl std::fmt::Display) -> ApiError {
     ApiError::bad("passkey_verification_failed", "Passkey verification failed. Start again and approve the request on your device.")
 }
+pub async fn legacy_auth_disabled() -> Result<Json<Value>,ApiError>{
+    Err(ApiError::new(StatusCode::GONE,"passwordless_auth_required","Use a passkey for browser sign-in. For the CLI, install https://api.pixuno.xyz/downloads/flowpay-cli-0.1.6.tgz and run flowpay init. Passwords and email codes are no longer used for sign-in."))
+}
+
+async fn browser_challenge(state: &AppState, kind: &str, value: Value) -> Result<Uuid, ApiError> {
+    sqlx::query("DELETE FROM browser_passkey_ceremonies WHERE expires_at<=now()")
+        .execute(state.store.pool()).await.map_err(db)?;
+    let active: i64 = sqlx::query_scalar("SELECT count(*) FROM browser_passkey_ceremonies WHERE expires_at>now()")
+        .fetch_one(state.store.pool()).await.map_err(db)?;
+    if active >= 2000 { return Err(ApiError::new(StatusCode::TOO_MANY_REQUESTS,"passkey_rate_limited","Try again in a few minutes.")); }
+    let id = Uuid::now_v7();
+    sqlx::query("INSERT INTO browser_passkey_ceremonies(id,kind,state,expires_at) VALUES($1,$2,$3,now()+interval '5 minutes')")
+        .bind(id).bind(kind).bind(value).execute(state.store.pool()).await.map_err(db)?;
+    Ok(id)
+}
+
+async fn consume_browser_challenge(state: &AppState, id: Uuid, kind: &str) -> Result<Value, ApiError> {
+    sqlx::query_scalar("DELETE FROM browser_passkey_ceremonies WHERE id=$1 AND kind=$2 AND expires_at>now() RETURNING state")
+        .bind(id).bind(kind).fetch_optional(state.store.pool()).await.map_err(db)?
+        .ok_or_else(||ceremony_error("expired challenge"))
+}
+
+#[derive(Deserialize)]
+pub struct SignupStart { business_name: String }
+
+pub async fn signup_start(State(state): State<AppState>, Json(input): Json<SignupStart>) -> Result<Json<Value>,ApiError> {
+    let name=input.business_name.trim();
+    if name.is_empty() || name.len()>120 { return Err(ApiError::bad("invalid_business_name","Enter a business name of up to 120 characters.")); }
+    let merchant=Uuid::now_v7();
+    let username=format!("mer_{}",merchant.simple());
+    let (options,registration)=webauthn()?.start_passkey_registration(merchant,&username,name,None).map_err(internal)?;
+    let mut options=serde_json::to_value(options).map_err(internal)?;
+    options["publicKey"]["authenticatorSelection"]["residentKey"]=json!("required");
+    options["publicKey"]["authenticatorSelection"]["requireResidentKey"]=json!(true);
+    let challenge=browser_challenge(&state,"SIGNUP",json!({"merchant_id":merchant,"name":name,"registration":registration})).await?;
+    Ok(Json(json!({"challenge_id":challenge,"options":options})))
+}
+
+pub async fn signup_finish(State(state): State<AppState>, headers: HeaderMap, Json(input): Json<RegistrationFinish>) -> Result<Json<Value>,ApiError> {
+    let value=consume_browser_challenge(&state,input.challenge_id,"SIGNUP").await?;
+    let merchant:Uuid=serde_json::from_value(value["merchant_id"].clone()).map_err(internal)?;
+    let registration:PasskeyRegistration=serde_json::from_value(value["registration"].clone()).map_err(internal)?;
+    let passkey=webauthn()?.finish_passkey_registration(&input.credential,&registration).map_err(ceremony_error)?;
+    let credential_id=URL_SAFE_NO_PAD.encode(passkey.cred_id().as_ref());
+    let mut tx=state.store.pool().begin().await.map_err(db)?;
+    sqlx::query("INSERT INTO merchants(id,public_id,name,status) VALUES($1,$2,$3,'ACTIVE')")
+        .bind(merchant).bind(format!("mer_{}",merchant.simple())).bind(value["name"].as_str().ok_or_else(||internal("missing name"))?)
+        .execute(&mut *tx).await.map_err(db)?;
+    sqlx::query("INSERT INTO merchant_passkeys(credential_id,merchant_id,passkey) VALUES($1,$2,$3)")
+        .bind(credential_id).bind(merchant).bind(serde_json::to_value(passkey).map_err(internal)?)
+        .execute(&mut *tx).await.map_err(db)?;
+    tx.commit().await.map_err(db)?;
+    browser_session(&state,merchant,&headers).await
+}
+
+pub async fn discover_start(State(state): State<AppState>) -> Result<Json<Value>,ApiError> {
+    let (options,authentication)=webauthn()?.start_discoverable_authentication().map_err(internal)?;
+    let mut options=serde_json::to_value(options).map_err(internal)?;
+    // The sign-in button opens the browser's passkey chooser immediately.
+    options.as_object_mut().ok_or_else(||internal("invalid options"))?.remove("mediation");
+    let challenge=browser_challenge(&state,"LOGIN",serde_json::to_value(authentication).map_err(internal)?).await?;
+    Ok(Json(json!({"challenge_id":challenge,"options":options})))
+}
+
+pub async fn discover_finish(State(state): State<AppState>, headers: HeaderMap, Json(input): Json<LoginFinish>) -> Result<Json<Value>,ApiError> {
+    let value=consume_browser_challenge(&state,input.challenge_id,"LOGIN").await?;
+    let authentication:DiscoverableAuthentication=serde_json::from_value(value).map_err(internal)?;
+    let wa=webauthn()?;
+    let (merchant,credential)=wa.identify_discoverable_authentication(&input.credential).map_err(ceremony_error)?;
+    let id=URL_SAFE_NO_PAD.encode(credential);
+    let mut tx=state.store.pool().begin().await.map_err(db)?;
+    let stored:Option<Value>=sqlx::query_scalar("SELECT p.passkey FROM merchant_passkeys p JOIN merchants m ON m.id=p.merchant_id WHERE p.credential_id=$1 AND p.merchant_id=$2 AND m.status='ACTIVE' FOR UPDATE OF p")
+        .bind(&id).bind(merchant).fetch_optional(&mut *tx).await.map_err(db)?;
+    let mut passkey:Passkey=serde_json::from_value(stored.ok_or_else(||ceremony_error("unknown passkey"))?).map_err(internal)?;
+    let result=wa.finish_discoverable_authentication(&input.credential,authentication,&[DiscoverableKey::from(&passkey)]).map_err(ceremony_error)?;
+    passkey.update_credential(&result);
+    sqlx::query("UPDATE merchant_passkeys SET passkey=$2,last_used_at=now() WHERE credential_id=$1")
+        .bind(id).bind(serde_json::to_value(passkey).map_err(internal)?).execute(&mut *tx).await.map_err(db)?;
+    tx.commit().await.map_err(db)?;
+    browser_session(&state,merchant,&headers).await
+}
+
+async fn browser_session(state:&AppState,merchant:Uuid,headers:&HeaderMap)->Result<Json<Value>,ApiError>{
+    let agent=headers.get("user-agent").and_then(|v|v.to_str().ok()).map(str::to_owned);
+    let (token,expiry)=create_session(state,merchant,agent).await?;
+    Ok(Json(json!({"session_token":token,"expires_at":expiry.unix_timestamp()*1000,"merchant":load_merchant(state,merchant).await?})))
+}
 
 fn session_hash(headers: &HeaderMap) -> Result<String, ApiError> {
     let token = headers.get("authorization").and_then(|v| v.to_str().ok())
@@ -65,7 +152,6 @@ async fn save_challenge<T: Serialize>(state: &AppState, merchant: Uuid, kind: &s
 pub async fn register_start(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<Value>,ApiError> {
     let merchant = authenticate_dashboard(&state,&headers).await?;
     let account = load_merchant(&state,merchant.0).await?;
-    if account["email_verified"]!=true {return Err(ApiError::bad("email_not_verified","Verify your email before creating a passkey."));}
     let rows = sqlx::query_scalar::<_,Value>("SELECT passkey FROM merchant_passkeys WHERE merchant_id=$1")
         .bind(merchant.0).fetch_all(state.store.pool()).await.map_err(db)?;
     let keys = rows.into_iter().map(serde_json::from_value::<Passkey>).collect::<Result<Vec<_>,_>>().map_err(internal)?;
@@ -73,6 +159,9 @@ pub async fn register_start(State(state): State<AppState>, headers: HeaderMap) -
     let (options, registration) = webauthn()?.start_passkey_registration(merchant.0,
         account["email"].as_str().unwrap_or("FlowPay merchant"), account["business_name"].as_str().unwrap_or("FlowPay merchant"),Some(ids)).map_err(internal)?;
     let challenge = save_challenge(&state,merchant.0,"REGISTER",Some(session_hash(&headers)?),&registration).await?;
+    let mut options=serde_json::to_value(options).map_err(internal)?;
+    options["publicKey"]["authenticatorSelection"]["residentKey"]=json!("required");
+    options["publicKey"]["authenticatorSelection"]["requireResidentKey"]=json!(true);
     Ok(Json(json!({"challenge_id":challenge,"options":options})))
 }
 

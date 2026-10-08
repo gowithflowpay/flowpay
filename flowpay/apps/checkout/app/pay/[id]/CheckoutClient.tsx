@@ -131,7 +131,7 @@ export function CheckoutClient({paymentId,home=false,suppressOutcome=false,initi
     if(!chatClaimId)return;
     const poll=async()=>{
       try{
-        const response=await fetch(`/api/payment/${encodeURIComponent(paymentId)}/agent/status?claim_id=${encodeURIComponent(chatClaimId)}`,{cache:"no-store"});
+        const response=await fetch(`/api/payment/${encodeURIComponent(paymentId)}/agent/status?claim_id=${encodeURIComponent(chatClaimId)}&session_id=${encodeURIComponent(chatSessionId)}`,{cache:"no-store"});
         if(!response.ok)return;
         const result=await response.json();
         if(result.recovery&&typeof result.recovery==="object")setRecoveryDetails(result.recovery);
@@ -143,7 +143,7 @@ export function CheckoutClient({paymentId,home=false,suppressOutcome=false,initi
     void poll();
     const timer=window.setInterval(()=>void poll(),4000);
     return()=>window.clearInterval(timer);
-  },[chatClaimId,paymentId]);
+  },[chatClaimId,chatSessionId,paymentId]);
 
   const load=useCallback(async()=>{
     try{
@@ -224,17 +224,19 @@ export function CheckoutClient({paymentId,home=false,suppressOutcome=false,initi
         method:"POST",
         headers:{"Content-Type":"application/json"},
         body:JSON.stringify({payment_id:payment.id,session_id:chatSessionId,email:chatEmail,messages:updated}),
+        signal:AbortSignal.timeout(30000),
       });
-      const body=await resp.json();
+      const body=await resp.json().catch(()=>({}));
+      if(!resp.ok)throw new Error(typeof body.error==="string"?body.error:body.error?.message??"The support agent is temporarily unavailable. Try again.");
       if(typeof body.email==="string")setChatEmail(body.email);
       const agentMsg={role:"agent",content:body.reply||"I'm here to help."};
       setChatMessages([...updated,agentMsg]);
       if(body.status==="CLAIM_CREATED"){
         setChatClaimId(body.claim_id);
-        setChatMessages([...updated,agentMsg,{role:"system",content:`Claim ${body.claim_id} created. Our team will investigate and process your refund.`}]);
+        setChatMessages([...updated,agentMsg,{role:"system",content:`Claim ${body.claim_id} created. Investigation has started. Recovery depends on transaction, ownership, and policy checks.`}]);
       }
-    }catch{
-      setChatMessages([...updated,{role:"agent",content:"Sorry, I couldn't process that. Please try again."}]);
+    }catch(reason){
+      setChatMessages([...updated,{role:"agent",content:reason instanceof Error?reason.message:"The support agent is temporarily unavailable. Try again."}]);
     }
     setChatLoading(false);
   };

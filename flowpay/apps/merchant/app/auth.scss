@@ -101,3 +101,5 @@ html .auth-page-cardless .auth-field input:focus{background:rgba(11,29,49,.9);bo
 html .auth-page-cardless .auth-submit{height:48px;margin-top:7px;font-family:inherit;font-size:14px;font-weight:600;background:#326cf2}
 html .auth-page-cardless .auth-footer{font-size:12px;line-height:1.5;margin-top:24px;color:#b9c7d9}.auth-page-cardless .auth-footer a{margin-left:3px}
 @media(max-width:480px){.auth-main:has(.auth-page-cardless){padding:30px 24px}.auth-page-cardless:before{background:rgba(5,17,35,.84)}html .auth-page-cardless .auth-brand{margin-bottom:28px}html .auth-page-cardless .auth-card h1{font-size:30px}html .auth-page-cardless .auth-field input{font-size:16px}}
+
+.passkey-explainer{font-size:12px;line-height:1.8;color:#88849a;margin:20px 0}.passkey-signin-mark{display:grid;place-items:center;width:64px;height:64px;border-radius:17px;background:#f1edff;color:#7452de;margin:25px auto}.passkey-signin-mark svg{width:30px;height:30px}.onboarding-progress{display:flex;gap:6px;margin:24px 0}.onboarding-progress i{height:3px;flex:1;background:#edeaf4;border-radius:4px}.onboarding-progress i.complete{background:#8160df}

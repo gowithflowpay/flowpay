@@ -41,6 +41,8 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/payments", get(list_payments).post(create_payment))
         .route("/v1/payments/{id}", get(get_payment))
         .route("/v1/public/payments/{id}", get(public_payment))
+        .route("/v1/public/payments/{id}/agent", post(public_agent_chat))
+        .route("/v1/public/payments/{id}/agent/status", get(public_agent_status))
         .route(
             "/v1/public/payments/{id}/deposits",
             get(public_payment_deposits),
@@ -71,15 +73,19 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/merchant/overview", get(get_overview))
         .route(
             "/v1/auth/signup",
-            post(signup),
+            post(crate::passkeys::legacy_auth_disabled),
         )
-        .route("/v1/auth/verify", post(verify_email))
-        .route("/v1/auth/resend", post(resend_code))
-        .route("/v1/auth/login", post(login))
+        .route("/v1/auth/verify", post(crate::passkeys::legacy_auth_disabled))
+        .route("/v1/auth/resend", post(crate::passkeys::legacy_auth_disabled))
+        .route("/v1/auth/login", post(crate::passkeys::legacy_auth_disabled))
         .route("/v1/auth/logout", post(logout))
         .route("/v1/auth/session", get(current_session))
         .route("/v1/auth/onboarding", post(complete_onboarding))
         .route("/v1/auth/passkeys", get(crate::passkeys::status))
+        .route("/v1/auth/passkeys/signup/start", post(crate::passkeys::signup_start))
+        .route("/v1/auth/passkeys/signup/finish", post(crate::passkeys::signup_finish))
+        .route("/v1/auth/passkeys/discover/start", post(crate::passkeys::discover_start))
+        .route("/v1/auth/passkeys/discover/finish", post(crate::passkeys::discover_finish))
         .route("/v1/auth/passkeys/register/start", post(crate::passkeys::register_start))
         .route("/v1/auth/passkeys/register/finish", post(crate::passkeys::register_finish))
         .route("/v1/auth/passkeys/login/start", post(crate::passkeys::login_start))
@@ -1427,6 +1433,10 @@ async fn get_claim(
     Path(id): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     let merchant = authenticate(&state, &headers).await?;
+    claim_view(state,merchant,id).await
+}
+
+async fn claim_view(state:AppState,merchant:MerchantId,id:String)->Result<Json<Value>,ApiError>{
     let c = state
         .store
         .get_claim(merchant, &id)
@@ -2436,74 +2446,6 @@ pub(crate) async fn create_session(
     Ok((token, expires_at))
 }
 
-/// Issues a six digit code, storing only its hash.
-async fn issue_verification_code(
-    state: &AppState,
-    email: &str,
-    purpose: &str,
-) -> Result<String, ApiError> {
-    let code = crate::auth::new_verification_code();
-    let code_hash = crate::auth::hash_secret(&code);
-    let expires_at = OffsetDateTime::now_utc()
-        + Duration::minutes(state.config.auth_code_ttl_minutes.max(1));
-    sqlx::query(
-        "INSERT INTO email_verification_codes(id,email,purpose,code_hash,expires_at) VALUES($1,$2,$3,$4,$5)",
-    )
-    .bind(Uuid::now_v7())
-    .bind(email)
-    .bind(purpose)
-    .bind(&code_hash)
-    .bind(expires_at)
-    .execute(state.store.pool())
-    .await
-    .map_err(db)?;
-    Ok(code)
-}
-
-/// Delivers a verification code, translating a missing SMTP setup into an
-/// actionable error rather than a silent failure.
-async fn send_verification_email(
-    state: &AppState,
-    email: &str,
-    code: &str,
-    purpose: &str,
-) -> Result<(), ApiError> {
-    let mailer = crate::auth::Mailer::from_config(&state.config).ok_or_else(|| {
-        ApiError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "mail_not_configured",
-            "email delivery is not configured",
-        )
-    })?;
-    let (heading, intro) = match purpose {
-        "LOGIN" => (
-            "Confirm it is you",
-            "Enter this code to finish signing in to your FlowPay dashboard.",
-        ),
-        _ => (
-            "Verify your email",
-            "Enter this code to activate your FlowPay merchant account.",
-        ),
-    };
-    let html = crate::auth::code_email_html(
-        heading,
-        intro,
-        code,
-        state.config.auth_code_ttl_minutes.max(1),
-    );
-    mailer
-        .send(email, "Your FlowPay verification code", html)
-        .await
-        .map_err(|error| {
-            tracing::error!(%error, %email, "verification email delivery failed");
-            ApiError::new(
-                StatusCode::BAD_GATEWAY,
-                "email_delivery_failed",
-                "we could not send the verification email, please try again",
-            )
-        })
-}
-
 fn merchant_json(row: &sqlx::postgres::PgRow) -> Value {
     json!({
         "id": row.try_get::<Uuid,_>("id").map(|v| v.to_string()).unwrap_or_default(),
@@ -2533,307 +2475,6 @@ pub(crate) async fn load_merchant(state: &AppState, merchant: Uuid) -> Result<Va
     Ok(merchant_json(&row))
 }
 
-#[derive(Debug, Deserialize)]
-struct SignupRequest {
-    email: String,
-    password: Option<String>,
-    business_name: String,
-    contact_name: Option<String>,
-}
-
-async fn signup(
-    State(state): State<AppState>,
-    Json(req): Json<SignupRequest>,
-) -> Result<(StatusCode, Json<Value>), ApiError> {
-    // Validate the request first so a caller sees the real problem rather than
-    // a server misconfiguration.
-    let email = normalize_email(&req.email)?;
-    if let Some(password) = &req.password { validate_password(password)?; }
-    let business_name = validate_business_name(&req.business_name)?;
-    // Then fail before creating anything if we cannot deliver the code, so we
-    // never leave an account that can never be verified.
-    if crate::auth::Mailer::from_config(&state.config).is_none() {
-        return Err(ApiError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "mail_not_configured",
-            "email delivery is not configured",
-        ));
-    }
-    let existing: Option<Uuid> =
-        sqlx::query_scalar("SELECT id FROM merchants WHERE lower(email)=$1")
-            .bind(&email)
-            .fetch_optional(state.store.pool())
-            .await
-            .map_err(db)?;
-    if existing.is_some() {
-        return Err(ApiError::new(
-            StatusCode::CONFLICT,
-            "email_already_registered",
-            "an account already exists for this email",
-        ));
-    }
-    let password_hash = req.password.as_deref().map(crate::auth::hash_password).transpose().map_err(|error| {
-        tracing::error!(%error, "password hashing failed");
-        ApiError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "password_hash_failed",
-            "could not secure the password",
-        )
-    })?;
-    let merchant_id = Uuid::now_v7();
-    let public_id = format!("mer_{}", &merchant_id.simple().to_string()[..20]);
-    let contact_name = req
-        .contact_name
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| value.chars().take(120).collect::<String>());
-    sqlx::query(
-        "INSERT INTO merchants(id,public_id,name,status,email,password_hash,contact_name) VALUES($1,$2,$3,'ACTIVE',$4,$5,$6)",
-    )
-    .bind(merchant_id)
-    .bind(&public_id)
-    .bind(&business_name)
-    .bind(&email)
-    .bind(&password_hash)
-    .bind(contact_name.as_deref())
-    .execute(state.store.pool())
-    .await
-    .map_err(db)?;
-    let code = issue_verification_code(&state, &email, "SIGNUP").await?;
-    if let Err(error) = send_verification_email(&state, &email, &code, "SIGNUP").await {
-        // The account exists, so tell the client to offer a resend instead of
-        // making them sign up again.
-        tracing::warn!(%email, "signup created but the code could not be sent");
-        return Ok((
-            StatusCode::ACCEPTED,
-            Json(json!({
-                "email": email,
-                "verification_required": true,
-                "email_sent": false,
-                "message": error.message,
-            })),
-        ));
-    }
-    Ok((
-        StatusCode::CREATED,
-        Json(json!({
-            "email": email,
-            "verification_required": true,
-            "email_sent": true,
-            "expires_in_minutes": state.config.auth_code_ttl_minutes,
-        })),
-    ))
-}
-
-#[derive(Debug, Deserialize)]
-struct VerifyEmailRequest {
-    email: String,
-    code: String,
-}
-
-async fn verify_email(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(req): Json<VerifyEmailRequest>,
-) -> Result<Json<Value>, ApiError> {
-    let email = normalize_email(&req.email)?;
-    let submitted = req.code.trim();
-    if submitted.len() != 6 || !submitted.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Err(ApiError::bad(
-            "invalid_code",
-            "enter the 6 digit code from your email",
-        ));
-    }
-    let row = sqlx::query(
-        "SELECT id,code_hash,attempts FROM email_verification_codes WHERE lower(email)=$1 AND consumed_at IS NULL AND expires_at>now() ORDER BY created_at DESC LIMIT 1",
-    )
-    .bind(&email)
-    .fetch_optional(state.store.pool())
-    .await
-    .map_err(db)?
-    .ok_or_else(|| {
-        ApiError::bad(
-            "code_expired",
-            "that code has expired, request a new one",
-        )
-    })?;
-    let code_id: Uuid = row.try_get("id").map_err(internal)?;
-    let attempts: i32 = row.try_get("attempts").map_err(internal)?;
-    if attempts >= 5 {
-        return Err(ApiError::new(
-            StatusCode::TOO_MANY_REQUESTS,
-            "too_many_attempts",
-            "too many incorrect attempts, request a new code",
-        ));
-    }
-    let stored_hash: String = row.try_get("code_hash").map_err(internal)?;
-    if !crate::auth::code_matches(submitted, &stored_hash) {
-        sqlx::query("UPDATE email_verification_codes SET attempts=attempts+1 WHERE id=$1")
-            .bind(code_id)
-            .execute(state.store.pool())
-            .await
-            .map_err(db)?;
-        return Err(ApiError::new(
-            StatusCode::UNAUTHORIZED,
-            "invalid_code",
-            "that code is not correct",
-        ));
-    }
-    let mut tx = state.store.pool().begin().await.map_err(db)?;
-    let consumed = sqlx::query("UPDATE email_verification_codes SET consumed_at=now() WHERE id=$1 AND consumed_at IS NULL AND expires_at>now() AND attempts<5")
-        .bind(code_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(db)?;
-    if consumed.rows_affected() != 1 { return Err(ApiError::bad("code_expired", "that code was already used or expired, request a new one")); }
-    let merchant: Uuid = sqlx::query_scalar(
-        "UPDATE merchants SET email_verified_at=coalesce(email_verified_at,now()),updated_at=now() WHERE lower(email)=$1 RETURNING id",
-    )
-    .bind(&email)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(db)?
-    .ok_or_else(|| {
-        ApiError::bad(
-            "account_not_found",
-            "no account matches this email, sign up first",
-        )
-    })?;
-    tx.commit().await.map_err(db)?;
-    let user_agent = headers
-        .get("user-agent")
-        .and_then(|value| value.to_str().ok())
-        .map(|value| value.chars().take(400).collect::<String>());
-    let (token, expires_at) = create_session(&state, merchant, user_agent).await?;
-    Ok(Json(json!({
-        "session_token": token,
-        "expires_at": expires_at.unix_timestamp() * 1000,
-        "merchant": load_merchant(&state, merchant).await?,
-    })))
-}
-
-#[derive(Debug, Deserialize)]
-struct ResendCodeRequest {
-    email: String,
-    purpose: Option<String>,
-}
-
-async fn resend_code(
-    State(state): State<AppState>,
-    Json(req): Json<ResendCodeRequest>,
-) -> Result<Json<Value>, ApiError> {
-    let email = normalize_email(&req.email)?;
-    let purpose = match req.purpose.as_deref() {
-        Some("LOGIN") => "LOGIN",
-        _ => "SIGNUP",
-    };
-    let exists: Option<Uuid> = sqlx::query_scalar("SELECT id FROM merchants WHERE lower(email)=$1")
-        .bind(&email)
-        .fetch_optional(state.store.pool())
-        .await
-        .map_err(db)?;
-    if exists.is_none() {
-        // Do not reveal whether the address is registered.
-        return Ok(Json(json!({"sent": true})));
-    }
-    let last: Option<OffsetDateTime> = sqlx::query_scalar(
-        "SELECT created_at FROM email_verification_codes WHERE lower(email)=$1 ORDER BY created_at DESC LIMIT 1",
-    )
-    .bind(&email)
-    .fetch_optional(state.store.pool())
-    .await
-    .map_err(db)?;
-    if last.is_some_and(|created| created > OffsetDateTime::now_utc() - Duration::seconds(45)) {
-        return Err(ApiError::new(
-            StatusCode::TOO_MANY_REQUESTS,
-            "resend_too_soon",
-            "a code was just sent, please wait a moment",
-        ));
-    }
-    let code = issue_verification_code(&state, &email, purpose).await?;
-    if let Err(error) = send_verification_email(&state, &email, &code, purpose).await {
-        tracing::error!(%email, "resend failed to deliver");
-        return Err(error);
-    }
-    Ok(Json(json!({
-        "sent": true,
-        "expires_in_minutes": state.config.auth_code_ttl_minutes,
-    })))
-}
-
-#[derive(Debug, Deserialize)]
-struct LoginRequest {
-    email: String,
-    password: String,
-}
-
-async fn login(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(req): Json<LoginRequest>,
-) -> Result<Json<Value>, ApiError> {
-    let email = normalize_email(&req.email)?;
-    let row = sqlx::query(
-        "SELECT id,password_hash,email_verified_at,status FROM merchants WHERE lower(email)=$1",
-    )
-    .bind(&email)
-    .fetch_optional(state.store.pool())
-    .await
-    .map_err(db)?;
-    let Some(row) = row else {
-        return Err(ApiError::new(
-            StatusCode::UNAUTHORIZED,
-            "invalid_credentials",
-            "email or password is incorrect",
-        ));
-    };
-    let stored: Option<String> = row.try_get("password_hash").map_err(internal)?;
-    let matches = stored
-        .as_deref()
-        .is_some_and(|hash| crate::auth::verify_password(&req.password, hash));
-    if !matches {
-        return Err(ApiError::new(
-            StatusCode::UNAUTHORIZED,
-            "invalid_credentials",
-            "email or password is incorrect",
-        ));
-    }
-    let status: String = row.try_get("status").map_err(internal)?;
-    if status != "ACTIVE" {
-        return Err(ApiError::new(
-            StatusCode::UNAUTHORIZED,
-            "merchant_disabled",
-            "merchant account is disabled",
-        ));
-    }
-    let verified: Option<OffsetDateTime> = row.try_get("email_verified_at").map_err(internal)?;
-    let merchant: Uuid = row.try_get("id").map_err(internal)?;
-    if verified.is_none() {
-        // The password was right, so completing verification is the next step.
-        let code = issue_verification_code(&state, &email, "LOGIN").await?;
-        let delivered = send_verification_email(&state, &email, &code, "LOGIN").await.is_ok();
-        return Err(ApiError::new(
-            StatusCode::FORBIDDEN,
-            "email_not_verified",
-            if delivered {
-                "verify your email to continue, we just sent a new code"
-            } else {
-                "verify your email to continue"
-            },
-        ));
-    }
-    let user_agent = headers
-        .get("user-agent")
-        .and_then(|value| value.to_str().ok())
-        .map(|value| value.chars().take(400).collect::<String>());
-    let (token, expires_at) = create_session(&state, merchant, user_agent).await?;
-    Ok(Json(json!({
-        "session_token": token,
-        "expires_at": expires_at.unix_timestamp() * 1000,
-        "merchant": load_merchant(&state, merchant).await?,
-    })))
-}
 
 async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<Value>, ApiError> {
     let Some(token) = bearer_token(&headers) else {
@@ -2866,6 +2507,7 @@ struct OnboardingRequest {
     contact_name: Option<String>,
     #[serde(default)]
     require_passkey: bool,
+    recovery_email: Option<String>,
 }
 
 async fn complete_onboarding(
@@ -2878,6 +2520,13 @@ async fn complete_onboarding(
         crate::passkeys::require_registered(&state, merchant.0).await?;
     }
     let business_name = validate_business_name(&req.business_name)?;
+    let email=req.recovery_email.as_deref().map(str::trim).filter(|v|!v.is_empty()).map(str::to_ascii_lowercase);
+    if let Some(value)=&email{
+        let parts:Vec<_>=value.split('@').collect();
+        if value.len()>254||value.chars().any(char::is_whitespace)||parts.len()!=2||parts[0].is_empty()||!parts[1].contains('.'){
+            return Err(ApiError::bad("invalid_email","Enter a valid recovery email address."));
+        }
+    }
     let address = req
         .evm_settlement_address
         .as_deref()
@@ -2901,12 +2550,13 @@ async fn complete_onboarding(
         .filter(|value| !value.is_empty())
         .map(|value| value.chars().take(120).collect::<String>());
     sqlx::query(
-        "UPDATE merchants SET name=$2,contact_name=coalesce($3,contact_name),evm_settlement_address=coalesce($4,evm_settlement_address),onboarding_completed_at=coalesce(onboarding_completed_at,now()),updated_at=now() WHERE id=$1",
+        "UPDATE merchants SET name=$2,contact_name=coalesce($3,contact_name),evm_settlement_address=coalesce($4,evm_settlement_address),email=coalesce($5,email),email_verified_at=CASE WHEN $5::text IS NOT NULL AND email IS DISTINCT FROM $5 THEN NULL ELSE email_verified_at END,onboarding_completed_at=coalesce(onboarding_completed_at,now()),updated_at=now() WHERE id=$1",
     )
     .bind(merchant.0)
     .bind(&business_name)
     .bind(contact_name.as_deref())
     .bind(address)
+    .bind(email)
     .execute(state.store.pool())
     .await
     .map_err(db)?;
@@ -3380,6 +3030,35 @@ async fn agent_chat(
         .get_payment(merchant, &req.payment_id)
         .await
         .map_err(map_store)?;
+    agent_chat_for_payment(state, req, payment).await
+}
+
+async fn public_agent_chat(State(state):State<AppState>,Path(id):Path<String>,Json(mut req):Json<AgentChatRequest>)->Result<Json<Value>,ApiError>{
+    req.payment_id=id;
+    let payment=state.store.get_payment_by_public_id(&req.payment_id).await.map_err(map_store)?;
+    let active:bool=sqlx::query_scalar("SELECT status='ACTIVE' FROM merchants WHERE id=$1").bind(payment.merchant_id.0).fetch_one(state.store.pool()).await.map_err(db)?;
+    if !active{return Err(ApiError::new(StatusCode::NOT_FOUND,"not_found","Checkout is unavailable."));}
+    agent_chat_for_payment(state,req,payment).await
+}
+
+#[derive(Deserialize)]
+struct AgentStatusQuery{claim_id:String,session_id:String}
+async fn public_agent_status(State(state):State<AppState>,Path(id):Path<String>,Query(query):Query<AgentStatusQuery>)->Result<Json<Value>,ApiError>{
+    let payment=state.store.get_payment_by_public_id(&id).await.map_err(map_store)?;
+    let allowed:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM agent_chat_intakes a JOIN claims c ON c.id=a.claim_id WHERE a.payment_id=$1 AND a.session_id=$2 AND c.public_id=$3)")
+        .bind(payment.id.0).bind(query.session_id).bind(&query.claim_id).fetch_one(state.store.pool()).await.map_err(db)?;
+    if !allowed{return Err(ApiError::new(StatusCode::NOT_FOUND,"not_found","Investigation not found for this conversation."));}
+    let claim=claim_view(state,payment.merchant_id,query.claim_id).await?.0;
+    let disposition=claim["agent"]["runs"].as_array().and_then(|runs|runs.last()).and_then(|run|run.get("final_disposition")).cloned().unwrap_or(Value::Null);
+    let verdict=match claim["status"].as_str(){Some("RECOVERED")=>json!("RECOVERED"),Some("RECOVERY_PENDING")=>json!("RECOVERY_PENDING"),_=>disposition};
+    Ok(Json(json!({"claim_id":claim["id"],"status":claim["status"],"verdict":verdict,"investigation":claim["investigation"],"recovery":claim["recovery"]})))
+}
+
+async fn agent_chat_for_payment(state:AppState,req:AgentChatRequest,payment:Payment)->Result<Json<Value>,ApiError>{
+    let merchant=payment.merchant_id;
+    if req.messages.is_empty()||req.messages.len()>30||req.messages.iter().map(|m|m.content.len()).sum::<usize>()>12000{
+        return Err(ApiError::bad("invalid_chat_messages","Keep the conversation under 30 messages and 12000 characters."));
+    }
     let supplied_email = req
         .email
         .as_deref()
@@ -3420,6 +3099,9 @@ async fn agent_chat(
             "chat session is invalid",
         ));
     }
+    let count:i32=sqlx::query_scalar("INSERT INTO checkout_agent_sessions(payment_id,session_id) VALUES($1,$2) ON CONFLICT(payment_id,session_id) DO UPDATE SET requests=CASE WHEN checkout_agent_sessions.window_started_at<now()-interval '1 minute' THEN 1 ELSE checkout_agent_sessions.requests+1 END,window_started_at=CASE WHEN checkout_agent_sessions.window_started_at<now()-interval '1 minute' THEN now() ELSE checkout_agent_sessions.window_started_at END RETURNING requests")
+        .bind(payment.id.0).bind(session_id).fetch_one(state.store.pool()).await.map_err(db)?;
+    if count>15{return Err(ApiError::new(StatusCode::TOO_MANY_REQUESTS,"chat_rate_limited","Wait a minute before sending another message."));}
     let latest_user_text = req
         .messages
         .iter()
@@ -3427,6 +3109,15 @@ async fn agent_chat(
         .find(|message| message.role.eq_ignore_ascii_case("user"))
         .map(|message| message.content.trim().to_ascii_lowercase())
         .unwrap_or_default();
+    if matches!(latest_user_text.as_str(),"hi"|"hello"|"hey"){
+        return Ok(Json(json!({"reply":"Hi. I can help you pay this checkout, check its status, or investigate a transfer. What do you need help with?","status":"CHAT"})));
+    }
+    if latest_user_text.contains("how do i pay")||latest_user_text.contains("how to pay"){
+        return Ok(Json(json!({"reply":format!("Send exactly {} {} on {} to the address shown on this checkout. Scan the QR code or copy the address into your wallet. The checkout updates automatically after the transfer is confirmed.",payment.expected_amount.to_decimal(payment.expected_asset.decimals),payment.expected_asset.symbol,payment.expected_chain.to_string().replace("custom:","").replace('_'," ")),"status":"CHAT"})));
+    }
+    if matches!(latest_user_text.as_str(),"status"|"payment status"|"check payment status"){
+        return Ok(Json(json!({"reply":format!("This payment is currently {}. FlowPay updates the checkout when it detects and confirms your transfer.",payment.state.as_str().to_lowercase().replace('_'," ")),"status":"CHAT"})));
+    }
     let greeting = latest_user_text
         .trim_matches(|character: char| !character.is_alphanumeric() && !character.is_whitespace());
     if matches!(
@@ -3635,7 +3326,7 @@ For absent extracted values use an empty string. The reply must be friendly, spe
     let response = state
         .http
         .post(ollama_endpoint)
-        .timeout(StdDuration::from_secs(45))
+        .timeout(StdDuration::from_secs(12))
         .json(&json!({
             "model": ollama_model,
             "messages": ollama_messages,

@@ -8,7 +8,7 @@ export async function POST(request:Request,{params}:{params:Promise<{id:string}>
     const {id}=await params;
     const body=await request.json();
     // Forward to backend agent chat endpoint
-    const result=await api(`/v1/agent/chat`,{
+    const result=await api(`/v1/public/payments/${encodeURIComponent(id)}/agent`,{
       method:"POST",
       body:JSON.stringify({...body,payment_id:id}),
     });

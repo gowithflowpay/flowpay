@@ -117,6 +117,11 @@ test("positional eth request prints shareable details and confirms receipt",asyn
     assert.match(result.stdout,new RegExp(payment.address));
     assert.match(result.stdout,/checkout.example.test/);
     assert.match(result.stderr,/Payment received and confirmed/);
+    for(const [shortcut,chain] of [["base","base_sepolia"],["arbitrum","arbitrum_sepolia"],["bsc","bsc_testnet"]]){
+      const alias=await runAsync(["request","20","USDC",shortcut,"--no-wait","--no-open","--json"],{FLOWPAY_CONFIG_DIR:directory});
+      assert.equal(alias.status,0,alias.stderr+alias.stdout);
+      assert.equal(created.chain,chain);
+    }
   }finally{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));fs.rmSync(directory,{recursive:true,force:true});}
 });
 

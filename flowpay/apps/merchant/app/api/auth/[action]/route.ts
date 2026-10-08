@@ -40,6 +40,20 @@ export async function POST(
 ){
   const {action}=await context.params;
   try{
+    const passkeyActions:Record<string,string>={"passkey-signup-start":"signup/start","passkey-signup-finish":"signup/finish","passkey-login-start":"discover/start","passkey-login-finish":"discover/finish","passkey-register-start":"register/start","passkey-register-finish":"register/finish"};
+    if(action in passkeyActions){
+      const input=await body(request);
+      const path="/v1/auth/passkeys/"+passkeyActions[action];
+      let data:any;
+      if(action.startsWith("passkey-register")){
+        const token=request.cookies.get(SESSION_COOKIE)?.value;
+        if(!token)return NextResponse.json({error:{message:"Please sign in again."}},{status:401});
+        data=await apiWithToken(path,{method:"POST",body:JSON.stringify(input)},token);
+      }else data=await apiPublic(path,{method:"POST",body:JSON.stringify(input)});
+      if(data.session_token)return attachSession(NextResponse.json({merchant:data.merchant}),data);
+      return NextResponse.json(data);
+    }
+    if(["signup","login","verify","resend"].includes(action))return NextResponse.json({error:{message:"Sign in with a passkey. Passwords and email codes are no longer used for browser sign-in."}},{status:410});
     if(action==="logout"){
       const token=request.cookies.get(SESSION_COOKIE)?.value;
       if(token){
@@ -52,35 +66,9 @@ export async function POST(
       return response;
     }
 
-    if(action==="signup"){
-      const input=await body(request);
-      const data=await apiPublic("/v1/auth/signup",{method:"POST",body:JSON.stringify(input)});
-      return NextResponse.json(
-        {email:data.email,verification_required:true,email_sent:data.email_sent!==false},
-        {status:data.email_sent===false?202:201},
-      );
-    }
-
-    if(action==="resend"){
-      const input=await body(request);
-      const data=await apiPublic("/v1/auth/resend",{method:"POST",body:JSON.stringify(input)});
-      return NextResponse.json({sent:data.sent!==false});
-    }
-
-    if(action==="verify"){
-      const input=await body(request);
-      const data=await apiPublic("/v1/auth/verify",{method:"POST",body:JSON.stringify(input)});
-      return attachSession(NextResponse.json({merchant:data.merchant}),data);
-    }
-
-    if(action==="login"){
-      const input=await body(request);
-      const data=await apiPublic("/v1/auth/login",{method:"POST",body:JSON.stringify(input)});
-      return attachSession(NextResponse.json({merchant:data.merchant}),data);
-    }
-
     if(action==="onboarding"){
       const input=await body(request);
+      input.require_passkey=true;
       const token=request.cookies.get(SESSION_COOKIE)?.value;
       if(!token)return NextResponse.json({error:{message:"Please sign in again."}},{status:401});
       const data=await apiWithToken(

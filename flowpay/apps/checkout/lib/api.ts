@@ -10,12 +10,12 @@ loadEnvConfig(path.resolve(process.cwd(), "../.."));
 export async function api(path:string,init:RequestInit={}){
   const base=(process.env.FLOWPAY_API_URL??"http://127.0.0.1:8080").replace(/\/$/,"");
   const key=process.env.FLOWPAY_CHECKOUT_API_KEY??process.env.FLOWPAY_API_KEY??process.env.FLOWPAY_DEMO_API_KEY;
-  if(!key)throw new Error("FLOWPAY_CHECKOUT_API_KEY is required on the hosted checkout server");
+  if(!key&&!path.startsWith("/v1/public/"))throw new Error("Checkout authentication is unavailable. Please try again.");
   const response=await fetch(base+path,{
     ...init,
     cache:"no-store",
     headers:{
-      "x-flowpay-api-key":key,
+      ...(key?{"x-flowpay-api-key":key}:{}),
       "content-type":"application/json",
       "accept":"application/json",
       ...(init.headers??{}),

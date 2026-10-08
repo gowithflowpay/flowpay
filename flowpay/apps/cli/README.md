@@ -3,7 +3,7 @@
 Install with Node.js 20 or newer:
 
 ```sh
-npm install -g https://api.pixuno.xyz/downloads/flowpay-cli.tgz
+npm install -g --prefer-online https://api.pixuno.xyz/downloads/flowpay-cli-0.1.6.tgz
 flowpay init
 flowpay request 20 usdc eth
 ```

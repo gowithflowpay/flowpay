@@ -125,10 +125,14 @@ impl Mailer {
             .header(lettre::message::header::ContentType::TEXT_HTML)
             .body(html)
             .map_err(|error| AuthError::Mail(error.to_string()))?;
-        // STARTTLS on 587 is what Google SMTP expects.
-        let transport = AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&self.host)
-            .map_err(|error| AuthError::Mail(error.to_string()))?
+        let builder = if self.port == 465 {
+            AsyncSmtpTransport::<Tokio1Executor>::relay(&self.host)
+        } else {
+            AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&self.host)
+        }.map_err(|error| AuthError::Mail(error.to_string()))?;
+        let transport = builder
             .port(self.port)
+            .timeout(Some(std::time::Duration::from_secs(15)))
             .credentials(Credentials::new(
                 self.username.clone(),
                 self.password.clone(),

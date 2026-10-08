@@ -44,7 +44,7 @@ tower-http.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 url.workspace = true
-webauthn-rs = { version = "0.5.5", features = ["danger-allow-state-serialisation"] }
+webauthn-rs = { version = "0.5.5", features = ["danger-allow-state-serialisation", "conditional-ui"] }
 
 [lints]
 workspace = true
