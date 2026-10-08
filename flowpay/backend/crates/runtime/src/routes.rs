@@ -81,6 +81,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/auth/logout", post(logout))
         .route("/v1/auth/session", get(current_session))
         .route("/v1/auth/onboarding", post(complete_onboarding))
+        .route("/v1/merchant/settlement-wallet", post(configure_settlement_wallet))
         .route("/v1/auth/passkeys", get(crate::passkeys::status))
         .route("/v1/auth/passkeys/signup/start", post(crate::passkeys::signup_start))
         .route("/v1/auth/passkeys/signup/finish", post(crate::passkeys::signup_finish))
@@ -2495,6 +2496,23 @@ async fn current_session(
 ) -> Result<Json<Value>, ApiError> {
     let merchant = authenticate(&state, &headers).await?;
     Ok(Json(json!({ "merchant": load_merchant(&state, merchant.0).await? })))
+}
+
+#[derive(Deserialize)]
+struct SettlementWalletRequest { address: String }
+
+async fn configure_settlement_wallet(State(state): State<AppState>, headers: HeaderMap, Json(input): Json<SettlementWalletRequest>) -> Result<Json<Value>, ApiError> {
+    let merchant = authenticate_dashboard(&state, &headers).await?;
+    let address = input.address.trim();
+    if address.len()!=42 || !address.starts_with("0x") || !address[2..].bytes().all(|byte|byte.is_ascii_hexdigit()) || address[2..].bytes().all(|byte|byte==b'0') {
+        return Err(ApiError::bad("invalid_settlement_address","Enter a valid, non-zero EVM wallet address."));
+    }
+    let updated = sqlx::query("UPDATE merchants SET evm_settlement_address=$2,updated_at=now() WHERE id=$1 AND (evm_settlement_address IS NULL OR btrim(evm_settlement_address)='' OR lower(evm_settlement_address)=lower($2))")
+        .bind(merchant.0).bind(address).execute(state.store.pool()).await.map_err(db)?;
+    if updated.rows_affected()!=1 {
+        return Err(ApiError::new(StatusCode::CONFLICT,"settlement_wallet_configured","A settlement wallet is already configured."));
+    }
+    Ok(Json(json!({"settlement_address":address})))
 }
 
 #[derive(Debug, Deserialize)]
