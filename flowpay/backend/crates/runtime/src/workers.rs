@@ -265,7 +265,8 @@ async fn payment_monitor_tick_inner(state: &AppState) -> anyhow::Result<()> {
                 .await?
                 .unwrap_or_else(|| health.latest_height.saturating_sub(8));
             let from = cursor.saturating_sub(3);
-            let to = health.latest_height.min(from.saturating_add(250));
+            let scan_span = if matches!(chain, ChainKey::Custom(value) if value == "monad_testnet") { 99 } else { 250 };
+            let to = health.latest_height.min(from.saturating_add(scan_span));
             if to < from {
                 continue;
             }

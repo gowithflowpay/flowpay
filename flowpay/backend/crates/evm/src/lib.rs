@@ -135,6 +135,11 @@ impl RpcEvmAdapter {
     }
 
     async fn block_number(&self) -> Result<u64, ChainError> {
+        if matches!(&self.identity.key, ChainKey::Custom(value) if value == "monad_testnet") {
+            let block = self.rpc("eth_getBlockByNumber", json!(["finalized", false])).await?;
+            return quantity_u64(block.get("number").and_then(Value::as_str)
+                .ok_or_else(|| ChainError::InvalidData("finalized block missing number".into()))?);
+        }
         quantity_u64(
             self.rpc("eth_blockNumber", json!([]))
                 .await?
@@ -389,7 +394,7 @@ impl ChainAdapter for RpcEvmAdapter {
             return Err(ChainError::NonCanonical);
         }
         let latest = self.block_number().await?;
-        let confirmations = latest.saturating_sub(block_number).saturating_add(1);
+        let confirmations = if block_number > latest { 0 } else { latest - block_number + 1 };
         Ok(ConfirmationStatus {
             observed_block: block_number,
             canonical_block_hash: canonical.to_owned(),
