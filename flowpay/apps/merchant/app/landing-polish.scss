@@ -1,0 +1,40 @@
+.fp-landing {
+  margin: 0;
+  isolation: isolate;
+  scroll-margin-top: 24px;
+
+  a, button { -webkit-tap-highlight-color: transparent; }
+  a:focus-visible, button:focus-visible { outline: 3px solid #7cb5ff; outline-offset: 5px; }
+  section[id] { scroll-margin-top: 28px; }
+  .landing-skip { position: absolute; top: 12px; left: 12px; z-index: 30; padding: 12px 18px; background: #fff; color: #143b64; border-radius: 6px; transform: translateY(-160%); }
+  .landing-skip:focus { transform: translateY(0); }
+  .landing-nav nav a { padding: 10px 0; transition: opacity .18s; }
+  .landing-nav nav a:hover { opacity: .75; }
+  .coral-button, .outline-button { transition: background .18s, box-shadow .18s, transform .18s; }
+  .coral-button:hover { box-shadow: 0 8px 24px #0002; transform: translateY(-2px); }
+  .landing-hero-video .hero-copy { width: 100%; }
+  .hero-copy p { margin-inline: auto; }
+  .feature-section, .products { max-width: 1800px; margin-inline: auto; }
+  .feature-card { transition: border-color .2s, box-shadow .2s; }
+  .feature-card:hover { border-color: #91b0c8; box-shadow: 0 10px 30px #143b640a; }
+  .product-showcase { border-radius: 12px; overflow: hidden; }
+  .product-showcase::before, .product-showcase::after { display: none; }
+  .landing-footer { border-top: 1px solid #dce6ed; }
+  .landing-footer a:hover { text-decoration: underline; text-underline-offset: 4px; }
+  .landing-footer > div:not(:first-child) { font-size: 13px; line-height: 1.5; }
+  .landing-footer > small { font-size: 11px; line-height: 1.6; }
+}
+
+@media (max-width: 760px) {
+  .fp-landing { margin: 0; }
+  .fp-landing .landing-nav nav { display: flex; grid-column: 1 / -1; justify-content: center; gap: clamp(18px, 5vw, 32px); }
+  .fp-landing .landing-nav { grid-template-columns: 1fr auto; height: auto; min-height: 120px; row-gap: 14px; }
+  .fp-landing .landing-nav-actions { grid-column: 2; grid-row: 1; }
+  .fp-landing .landing-nav nav a { font-size: 12px; padding: 8px 0; }
+  .fp-landing .landing-hero-video { padding-top: 180px; }
+}
+@media (max-width: 420px) { .fp-landing { margin: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .fp-landing *, .fp-landing *::before, .fp-landing *::after { animation: none !important; transition: none !important; }
+  .fp-landing .reveal { opacity: 1; transform: none; }
+}
