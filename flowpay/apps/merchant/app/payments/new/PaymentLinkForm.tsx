@@ -29,7 +29,7 @@ export function PaymentLinkForm({catalog}:{catalog:PaymentAsset[]}){
   return <div className="simple-link-page reference-link-page payment-builder">
     <div className="simple-link-heading"><span>Crypto checkout</span><h1>Create payment</h1><p>Configure the asset and network. FlowPay generates a hosted checkout and watches the chain.</p></div>
     <div className="payment-builder-grid"><form action="/api/payments" method="post" className="simple-link-card" onSubmit={submit}>
-      <SelectField name="asset" label="Asset" options={assets} onValueChange={option=>setAsset(option.value)}/>
+      <SelectField name="asset" label="Coin" options={assets} onValueChange={option=>setAsset(option.value)}/>
       <Field.Root className="simple-field amount-field" name="amount"><Field.Label>Amount</Field.Label><div><Field.Control placeholder="0.00" value={amount} onChange={event=>setAmount(event.target.value)} inputMode="decimal" min="0.000000000000000001" step="any" required/></div><Field.Error match="valueMissing">Enter an amount.</Field.Error><Field.Error match="rangeUnderflow">Enter an amount greater than zero.</Field.Error></Field.Root>
       <SelectField key={asset} name="chain" label="Network" options={allowedNetworks}/>
       <Field.Root className="simple-field" name="reference"><Field.Label>Description</Field.Label><Field.Control placeholder="What is this payment for?" value={name} onChange={event=>setName(event.target.value)} maxLength={160}/></Field.Root>

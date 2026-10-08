@@ -13,7 +13,6 @@ export function SelectField({name,label,options,onValueChange}:{name:string;labe
   const selected=options.find(option=>option.value===value)??options[0];
 
   return <Field.Root className="field custom-select-field" name={name}>
-    <input type="hidden" name={name} value={value}/>
     <Select.Root value={value} onValueChange={(nextValue)=>{const next=options.find(option=>option.value===nextValue);setValue(String(nextValue));if(next)onValueChange?.(next)}}>
       <Select.Label>{label}</Select.Label>
       <Select.Trigger className="select-trigger">
@@ -29,7 +28,7 @@ export function SelectField({name,label,options,onValueChange}:{name:string;labe
             <Select.List>
               {options.map(option=><Select.Item value={option.value} className="select-option" key={option.value}>
                 <Image src={option.icon} width={30} height={30} alt=""/>
-                <span><Select.ItemText><strong>{option.label}</strong><small>{option.detail}</small></Select.ItemText></span>
+                <Select.ItemText className="select-copy"><strong>{option.label}</strong><small>{option.detail}</small></Select.ItemText>
                 <Select.ItemIndicator><CheckIcon/></Select.ItemIndicator>
               </Select.Item>)}
             </Select.List>

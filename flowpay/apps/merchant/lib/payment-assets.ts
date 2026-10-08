@@ -9,8 +9,8 @@ const tokenMeta:Record<string,{name:string;icon:string}>={
   BNB:{name:"BNB",icon:"/assets/bsc.svg"},
 };
 export function assetOptions(catalog:PaymentAsset[]):PaymentOption[]{
-  return [...new Set(catalog.map(asset=>asset.symbol))].sort((a,b)=>a==="USDC"?-1:b==="USDC"?1:a.localeCompare(b)).map(symbol=>({value:symbol,label:symbol,detail:tokenMeta[symbol]?.name??symbol,icon:tokenMeta[symbol]?.icon??"/assets/flowpay-mark.svg"}));
+  return [...new Set(catalog.map(asset=>asset.symbol.toUpperCase()))].sort((a,b)=>a==="USDC"?-1:b==="USDC"?1:a.localeCompare(b)).map(symbol=>({value:symbol,label:symbol,detail:`${tokenMeta[symbol]?.name??symbol} · ${new Set(catalog.filter(asset=>asset.symbol.toUpperCase()===symbol).map(asset=>asset.chain)).size} networks`,icon:tokenMeta[symbol]?.icon??"/assets/flowpay-mark.svg"}));
 }
 export function networkOptions(catalog:PaymentAsset[],symbol:string):PaymentOption[]{
-  return [...new Set(catalog.filter(asset=>asset.symbol===symbol).map(asset=>asset.chain))].map(chain=>({value:chain,label:networkLabel(chain),detail:chain.replace(/^custom:/,"").includes("testnet")||chain.includes("sepolia")||chain.includes("amoy")?"Test network":"Mainnet",icon:networkAsset(chain)}));
+  return [...new Set(catalog.filter(asset=>asset.symbol.toUpperCase()===symbol.toUpperCase()).map(asset=>asset.chain))].map(chain=>({value:chain,label:networkLabel(chain),detail:chain.replace(/^custom:/,"").includes("testnet")||chain.includes("sepolia")||chain.includes("amoy")?"Test network":"Mainnet",icon:networkAsset(chain)}));
 }
