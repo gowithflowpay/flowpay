@@ -1040,6 +1040,7 @@ fn native_symbol(chain: &ChainKey) -> &'static str {
             "ETH"
         }
         ChainKey::Custom(value) if value == "bsc_testnet" => "BNB",
+        ChainKey::Custom(value) if value == "monad_testnet" => "MON",
         _ => "NATIVE",
     }
 }

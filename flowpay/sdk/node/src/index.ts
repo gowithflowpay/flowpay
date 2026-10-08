@@ -1,4 +1,4 @@
-export type Chain = "base" | "bsc" | "ethereum_sepolia" | "base_sepolia" | "arbitrum_sepolia" | "bsc_testnet" | "optimism_sepolia" | "polygon_amoy" | `custom:${string}`;
+export type Chain = "base" | "bsc" | "ethereum_sepolia" | "base_sepolia" | "arbitrum_sepolia" | "bsc_testnet" | "optimism_sepolia" | "polygon_amoy" | "monad_testnet" | `custom:${string}`;
 export type PaymentStatus = "CREATED"|"WAITING"|"DETECTED"|"CONFIRMING"|"PARTIALLY_PAID"|"OVERPAID"|"WRONG_ASSET"|"WRONG_CHAIN_CLAIMED"|"CONFIRMED"|"SETTLING"|"COMPLETED"|"EXPIRED"|"FAILED"|"CLAIM_PENDING"|"RECOVERY_AVAILABLE"|"RECOVERY_PENDING"|"RECOVERED"|"ESCALATED"|"CANCELLED";
 export interface Payment { id:string; address:string; amount:string; amount_atomic:string; asset:string; chain:Chain; status:PaymentStatus; expires_at:string; reference?:string|null; merchant_name?:string|null; checkout_url:string }
 export interface CreatePaymentInput { amount:string; asset:string; chain:Chain; reference?:string; expires_in_seconds?:number; overpayment_policy?:"ACCEPT_AND_RECORD"|"REQUIRE_REVIEW"|"REJECT_SETTLEMENT" }

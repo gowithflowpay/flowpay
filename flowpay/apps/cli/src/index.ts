@@ -408,7 +408,7 @@ async function cmdRequest(args: string[], flags: Record<string, string | boolean
   const [amount, asset, network] = args;
   if (!amount || !asset) fail(new Error("usage: flowpay request <amount> <asset> <network>"));
   const requestedChain = (typeof flags.chain === "string" ? flags.chain : network ?? "base").toLowerCase();
-  const chain = ({eth:"ethereum_sepolia",ethereum:"ethereum_sepolia",base:"base_sepolia",arb:"arbitrum_sepolia",arbitrum:"arbitrum_sepolia",bnb:"bsc_testnet",bsc:"bsc_testnet",sepolia:"ethereum_sepolia"} as Record<string,string>)[requestedChain] ?? requestedChain;
+  const chain = ({monad:"monad_testnet",eth:"ethereum_sepolia",ethereum:"ethereum_sepolia",base:"base_sepolia",arb:"arbitrum_sepolia",arbitrum:"arbitrum_sepolia",bnb:"bsc_testnet",bsc:"bsc_testnet",sepolia:"ethereum_sepolia"} as Record<string,string>)[requestedChain] ?? requestedChain;
   if(!/^\d+(\.\d+)?$/.test(amount)||Number(amount)<=0)throw new Error("Payment amount must be greater than zero");
   const api = client();
   const payment = await api.payments.create(

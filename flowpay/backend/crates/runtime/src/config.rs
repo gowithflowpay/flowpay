@@ -133,6 +133,9 @@ impl Config {
                 &factory,
             )?;
         }
+        if !is_local {
+            add_chain(&mut chains, ChainKey::Custom("monad_testnet".into()), "MONAD_TESTNET", 10143, &factory)?;
+        }
         let model_provider = parse_model_provider()?;
         // Ollama is the sole investigative provider. Do not silently switch to a
         // hosted model when the local investigator is unavailable.

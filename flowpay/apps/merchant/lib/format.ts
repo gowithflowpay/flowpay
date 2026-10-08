@@ -25,16 +25,18 @@ function chainKey(chain:unknown){
 export function networkAsset(chain:unknown){
   const key=chainKey(chain);
   if(key==="bsc"||key==="bsc_testnet")return "/assets/bsc.svg";
+  if(key==="monad_testnet")return "/assets/monad.svg";
   if(key==="ethereum_sepolia")return "/assets/ethereum.svg";
   if(key==="arbitrum_sepolia")return "/assets/arbitrum.svg";
   return "/assets/base.svg";
 }
 export function networkLabel(chain:unknown){
   const key=chainKey(chain);
-  return ({base:"Base",bsc:"BNB Smart Chain",base_sepolia:"Base Sepolia",ethereum_sepolia:"Ethereum Sepolia",arbitrum_sepolia:"Arbitrum Sepolia",bsc_testnet:"BSC Testnet"} as Record<string,string>)[key]??key;
+  return ({monad_testnet:"Monad Testnet",base:"Base",bsc:"BNB Smart Chain",base_sepolia:"Base Sepolia",ethereum_sepolia:"Ethereum Sepolia",arbitrum_sepolia:"Arbitrum Sepolia",bsc_testnet:"BSC Testnet"} as Record<string,string>)[key]??key;
 }
 export function tokenAsset(symbol:string){
   const key=symbol.toUpperCase();
+  if(key==="MON")return "/assets/monad.svg";
   if(key==="USDT")return "/assets/usdt.svg";
   if(key==="ETH"||key==="BNB"||key==="POL")return "/assets/ethereum.svg";
   return "/assets/usdc.svg";

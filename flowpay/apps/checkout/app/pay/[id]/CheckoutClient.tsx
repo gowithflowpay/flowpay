@@ -34,6 +34,7 @@ export type Deposit={amount_atomic?:string;asset_symbol?:string;asset?:string;co
 
 type ChainMeta={label:string;asset:string};
 const chainMeta:Record<string,ChainMeta>={
+  monad_testnet:{label:"Monad Testnet",asset:"/assets/monad.svg"},
   base:{label:"Base",asset:"/assets/base.svg"},
   base_sepolia:{label:"Base Sepolia",asset:"/assets/base.svg"},
   bsc:{label:"BNB Smart Chain",asset:"/assets/bsc.svg"},

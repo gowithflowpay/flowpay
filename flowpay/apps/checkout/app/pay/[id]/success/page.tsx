@@ -7,6 +7,7 @@ import {AmountIcon,CheckIcon,ExternalIcon,NetworkIcon,QuestionIcon,ReceiptIcon} 
 
 type Payment={id:string;amount:string;asset:string;chain:string;status:string;merchant_name?:string|null};
 const networks:Record<string,{label:string;asset:string}>={
+  monad_testnet:{label:"Monad Testnet",asset:"/assets/monad.svg"},
   base:{label:"Base",asset:"/assets/base.svg"},
   base_sepolia:{label:"Base Sepolia",asset:"/assets/base.svg"},
   bsc:{label:"BNB Smart Chain",asset:"/assets/bsc.svg"},

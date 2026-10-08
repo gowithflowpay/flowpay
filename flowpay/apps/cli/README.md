@@ -3,12 +3,13 @@
 Install with Node.js 20 or newer:
 
 ```sh
-npm install -g --prefer-online https://api.pixuno.xyz/downloads/flowpay-cli-0.1.6.tgz
+npm install -g --prefer-online https://api.pixuno.xyz/downloads/flowpay-cli-0.1.7.tgz
 flowpay init
 flowpay request 20 usdc eth
+flowpay request 0.01 mon monad --no-wait --no-open
 ```
 
-The terminal wizard asks for business name, recovery email and EVM settlement wallet. It generates an Ed25519 device key locally, proves possession with a signed server challenge, and signs you in immediately. No password, email OTP or browser approval is required. The recovery email is recorded without claiming it has been verified. `eth` currently means Ethereum Sepolia testnet.
+The terminal wizard asks for business name, recovery email and EVM settlement wallet. It generates an Ed25519 device key locally, proves possession with a signed server challenge, and signs you in immediately. No password, email OTP or browser approval is required. The recovery email is recorded without claiming it has been verified. `eth` currently means Ethereum Sepolia testnet. `monad` means Monad Testnet (chain ID 10143), whose native payment coin is MON. The `/v1/payment-assets` endpoint lists enabled coin and network pairs.
 
 Requests print a wallet address and checkout URL, then monitor the backend until confirmed. Use `--no-wait` to return immediately or `--json` for scripts. Resume with `flowpay payment wait PAYMENT_ID`. Read state with `flowpay payment status PAYMENT_ID --json`.
 
