@@ -82,7 +82,7 @@
  @media(max-width:800px){padding-top:25px;.dashboard-heading{align-items:flex-start}.dashboard-heading-actions{flex-direction:column;align-items:stretch}.dashboard-summary-grid,.dashboard-detail-grid{grid-template-columns:1fr}.dashboard-counts{grid-template-columns:1fr 1fr}.dashboard-count strong{margin-top:20px}.dashboard-count>a{position:absolute;right:20px;bottom:25px;padding:0}.dashboard-insights{display:grid;grid-template-columns:1fr 1fr}.dashboard-shortcuts{grid-template-columns:1fr}.dashboard-shortcuts>a{padding:18px}.dashboard-shortcuts small{font-size:10px}}
  @media(max-width:600px){
   padding-top:0;
-  .dashboard-heading{flex-direction:column;gap:20px;margin-bottom:24px}
+  .dashboard-heading{display:none}
   .dashboard-heading h1{font-size:30px}
   .dashboard-heading p{font-size:13px;line-height:1.6;max-width:none;gap:6px}
   .dashboard-business-name{flex-basis:100%;font-weight:500}
