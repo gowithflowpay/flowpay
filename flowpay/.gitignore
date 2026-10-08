@@ -39,3 +39,6 @@ apps/mcp/dist/
 apps/mcp/dist-http/
 sdk/node/dist/
 .hero-check-profile*/
+.vercel/
+.env.local
+.release-sha

@@ -1,0 +1,19 @@
+[Unit]
+Description=FlowPay Worker
+After=network-online.target postgresql.service rabbitmq-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=flowpay
+Group=flowpay
+WorkingDirectory=/opt/flowpay
+EnvironmentFile=/etc/flowpay.env
+ExecStart=/opt/flowpay/bin/flowpay-worker
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -6,7 +6,7 @@ import {Sidebar} from "./Sidebar";
 import {ThemeToggle} from "./ThemeToggle";
 
 // These routes own the whole viewport, so they get no navigation chrome.
-const BARE_PATHS=["/login","/signup","/verify","/onboarding","/oauth/authorize","/docs"];
+const BARE_PATHS=["/login","/signup","/verify","/onboarding"];
 
 function initials(name:string|null){
   const source=(name??"FlowPay").trim();
@@ -24,7 +24,6 @@ export function AppShell({
   children:ReactNode;
 }){
   const pathname=usePathname();
-  if(pathname==="/docs"||pathname.startsWith("/docs/"))return <>{children}</>;
   if(BARE_PATHS.some(path=>pathname===path||pathname.startsWith(`${path}/`))){
     return <main className="main auth-main">{children}</main>;
   }

@@ -5,8 +5,8 @@ export const dynamic="force-dynamic";
 export default async function VerifyPage({
   searchParams,
 }:{
-  searchParams:Promise<{email?:string;notice?:string;purpose?:string;next?:string}>;
+  searchParams:Promise<{email?:string;notice?:string}>;
 }){
-  const {email,notice,purpose,next}=await searchParams;
-  return <VerifyForm email={email??""} initialNotice={notice??null} purpose={purpose} next={next??null}/>;
+  const {email,notice}=await searchParams;
+  return <VerifyForm email={email??""} initialNotice={notice??null}/>;
 }

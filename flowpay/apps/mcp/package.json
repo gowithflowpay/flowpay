@@ -1,10 +1,10 @@
 {
   "name": "@flowpay/mcp",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "bin": {"flowpay-mcp": "dist/index.js"},
-  "scripts": {"build": "tsc -p tsconfig.json", "build:http": "tsc -p tsconfig.http.json", "check": "tsc -p tsconfig.vercel.json", "test": "npm run build && node --test", "start": "node dist/index.js", "start:http": "node dist-http/src/http.js"},
+  "scripts": {"build": "tsc -p tsconfig.json", "start": "node dist/index.js"},
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.1",
     "zod": "^4.6.5"

@@ -4,7 +4,6 @@ import {StdioServerTransport} from "@modelcontextprotocol/sdk/server/stdio.js";
 import {mkdir,readFile,writeFile} from "node:fs/promises";
 import {existsSync} from "node:fs";
 import path from "node:path";
-import os from "node:os";
 import {z} from "zod";
 
 const root=path.resolve(process.env.FLOWPAY_PROJECT_ROOT??process.cwd());
@@ -26,27 +25,11 @@ async function jsonRequest(route:string,init:RequestInit){
   return body;
 }
 
-async function cliCredentials():Promise<{apiKey?:string;sessionToken?:string;sessionExpiresAt?:number; baseUrl?:string}>{
-  const directory=process.env.FLOWPAY_CONFIG_DIR??path.join(os.homedir(),".flowpay");
-  try{
-    const config=JSON.parse(await readFile(path.join(directory,"config.json"),"utf8"));
-    return typeof config==="object"&&config!==null?config:{};
-  }catch(error){
-    if((error as NodeJS.ErrnoException).code==="ENOENT")return {};
-    throw new Error("Unable to read CLI credentials; run flowpay login again");
-  }
-}
-
 async function provisionCredential(label:string){
-  const config=process.env.FLOWPAY_API_KEY||process.env.FLOWPAY_MERCHANT_TOKEN?{}:await cliCredentials();
-  if(config.baseUrl&&config.baseUrl.replace(/\/$/,"")!==apiBase)throw new Error("CLI credentials belong to a different API; set FLOWPAY_API_URL to the CLI's configured API URL");
-  const existing=process.env.FLOWPAY_API_KEY?.trim()||config.apiKey?.trim();
-  if(existing){
-    await jsonRequest("/v1/payments?limit=1",{headers:{"x-flowpay-api-key":existing}});
-    return existing;
-  }
-  const token=process.env.FLOWPAY_MERCHANT_TOKEN?.trim()||(!config.sessionExpiresAt||config.sessionExpiresAt>Date.now()?config.sessionToken?.trim():undefined);
-  if(!token)throw new Error("Run flowpay login or flowpay init, or configure FLOWPAY_API_KEY or FLOWPAY_MERCHANT_TOKEN in the MCP server environment");
+  const existing=process.env.FLOWPAY_API_KEY?.trim();
+  if(existing)return existing;
+  const token=process.env.FLOWPAY_MERCHANT_TOKEN?.trim();
+  if(!token)throw new Error("Configure FLOWPAY_API_KEY or FLOWPAY_MERCHANT_TOKEN in the MCP server environment");
   const result=await jsonRequest("/v1/api-keys",{
     method:"POST",
     headers:{authorization:`Bearer ${token}`,"content-type":"application/json"},
@@ -54,7 +37,6 @@ async function provisionCredential(label:string){
   });
   const credential=String(result.api_key??"").trim();
   if(!credential)throw new Error("FlowPay did not return the one-time API credential");
-  await jsonRequest("/v1/payments?limit=1",{headers:{"x-flowpay-api-key":credential}});
   return credential;
 }
 
@@ -103,7 +85,7 @@ server.registerTool("flowpay_install_nextjs",{
   await mergeEnv(".env.local",{FLOWPAY_API_URL:apiBase,FLOWPAY_CHECKOUT_URL:checkoutBase,FLOWPAY_API_KEY:credential});
   const routeFile=`app${route}/route.ts`.replace(/\/+/g,"/");
   await mkdir(path.dirname(inside(routeFile)),{recursive:true});
-  await writeFile(inside(routeFile),`import {NextResponse} from "next/server";\n\nexport async function POST(request:Request){\n  const input=await request.json();\n  const response=await fetch(\`${apiBase}/v1/payments\`,{method:"POST",headers:{"x-flowpay-api-key":process.env.FLOWPAY_API_KEY??"","content-type":"application/json","idempotency-key":crypto.randomUUID()},body:JSON.stringify({amount:String(input.amount),asset:input.asset??"USDC",chain:input.chain??"base",reference:input.reference})});\n  const body=await response.json();\n  return NextResponse.json(body,{status:response.status});\n}\n`,"utf8");
+  await writeFile(inside(routeFile),`import {NextResponse} from "next/server";\n\nexport async function POST(request:Request){\n  const input=await request.json();\n  const response=await fetch(\`${apiBase}/v1/payments\`,{method:"POST",headers:{authorization:\`Bearer \${process.env.FLOWPAY_API_KEY}\`,"content-type":"application/json","idempotency-key":crypto.randomUUID()},body:JSON.stringify({amount:String(input.amount),asset:input.asset??"USDC",chain:input.chain??"base",reference:input.reference})});\n  const body=await response.json();\n  return NextResponse.json(body,{status:response.status});\n}\n`,"utf8");
   await mkdir(path.dirname(inside(componentPath)),{recursive:true});
   await writeFile(inside(componentPath),`"use client";\nimport {useState} from "react";\n\nexport function FlowPayButton({amount,reference,asset="USDC",chain="base"}:{amount:string;reference?:string;asset?:"USDC"|"USDT"|"ETH";chain?:string}){\n  const [busy,setBusy]=useState(false);\n  const [error,setError]=useState("");\n  async function pay(){setBusy(true);setError("");try{const response=await fetch("${route}",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({amount,reference,asset,chain})});const body=await response.json();if(!response.ok)throw new Error(body?.error?.message??"Unable to create payment");window.location.assign(body.checkout_url);}catch(value){setError(value instanceof Error?value.message:"Unable to create payment");setBusy(false)}}\n  return <div><button type="button" onClick={pay} disabled={busy}>{busy?"Opening secure checkout…":"Pay with crypto"}</button>{error?<p role="alert">{error}</p>:null}</div>;\n}\n`,"utf8");
   return {content:[{type:"text",text:JSON.stringify({installed:true,framework:"nextjs",files:[routeFile,componentPath,".env.local"],credential:"stored directly; not exposed",next:`Import FlowPayButton from ${componentPath} and render it with the order amount and reference.`})}]};
@@ -118,7 +100,7 @@ server.registerTool("flowpay_verify_integration",{
   const key=env.match(/^FLOWPAY_API_KEY=(.+)$/m)?.[1]?.trim();
   const files={route:existsSync(inside(route)),component:existsSync(inside(componentPath)),env:Boolean(key)};
   let api=false;
-  if(key){try{await jsonRequest("/v1/payments?limit=1",{headers:{"x-flowpay-api-key":key}});api=true;}catch{}}
+  if(key){try{await jsonRequest("/v1/payments?limit=1",{headers:{authorization:`Bearer ${key}`}});api=true;}catch{}}
   return {content:[{type:"text",text:JSON.stringify({ok:Object.values(files).every(Boolean)&&api,files,api_authenticated:api,secrets_exposed:false})}]};
 });
 

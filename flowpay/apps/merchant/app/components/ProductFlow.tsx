@@ -1,10 +1,8 @@
-type ProductKind="checkout"|"webhooks"|"recovery"|"cli"|"mcp";
+type ProductKind="checkout"|"webhooks"|"recovery";
 const flows={
  checkout:{caption:"ONE INTEGRATION. EVERY PAYMENT CONNECTED.",inputs:["BASE","ETHEREUM","POLYGON","ARBITRUM"],values:["115 USDC","120 USDC","80 USDC","900 USDC"],status:"PAID"},
  webhooks:{caption:"SIGNED EVENTS. DELIVERED TO YOUR PLATFORM.",inputs:["CREATED","DETECTED","CONFIRMED","SETTLED"],values:["payment","deposit","receipt","settlement"],status:"DELIVERED"},
  recovery:{caption:"VERIFIED EVIDENCE. GUIDED PAYMENT RECOVERY.",inputs:["TRANSFER","ASSET","NETWORK","CLAIM"],values:["Transaction","Token","Chain","Evidence"],status:"VERIFIED"},
- cli:{caption:"YOUR TERMINAL. CONNECTED TO PAYMENT RAILS.",inputs:["REGISTER","EMAIL","REQUEST","RECEIPT"],values:["Account","OTP code","20 USDC","Sepolia"],status:"READY"},
- mcp:{caption:"YOUR AI CLIENT. AUTHORIZED PAYMENT TOOLS.",inputs:["CHATGPT","CLAUDE","PKCE","SCOPES"],values:["Connect","Approve","Verified","Payments"],status:"CONNECTED"},
 };
 export function ProductFlow({kind}:{kind:ProductKind}){
  const flow=flows[kind];

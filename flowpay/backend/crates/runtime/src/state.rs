@@ -1,6 +1,6 @@
 use crate::config::Config;
 use anyhow::Context;
-use flowpay_chains::{ChainAdapter, ChainIdentity, CounterfactualEvmAdapter};
+use flowpay_chains::ChainIdentity;
 use flowpay_domain::ChainKey;
 use flowpay_evm::{Create3AddressDeriver, RpcEvmAdapter};
 use flowpay_persistence::PgStore;
@@ -47,22 +47,6 @@ impl AppState {
                 config.factory_runtime_code_hash.clone(),
                 Some(config.operator_address.clone()),
             );
-            if !config.environment.eq_ignore_ascii_case("local") {
-                if config.factory_runtime_code_hash.is_none() {
-                    anyhow::bail!("FLOWPAY_FACTORY_RUNTIME_CODE_HASH is required outside local mode");
-                }
-                adapter
-                    .health()
-                    .await
-                    .with_context(|| format!("chain identity or RPC health check failed for {key}"))?;
-                let factory = adapter
-                    .verify_factory(&cc.factory_address)
-                    .await
-                    .with_context(|| format!("factory attestation failed for {key}"))?;
-                if !factory.recovery_capable {
-                    anyhow::bail!("factory attestation rejected configured deployment for {key}");
-                }
-            }
             chains.insert(
                 key.clone(),
                 ChainRuntime {

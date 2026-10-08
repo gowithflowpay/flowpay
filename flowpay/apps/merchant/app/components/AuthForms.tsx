@@ -59,10 +59,6 @@ function Submit({busy,children}:{busy:boolean;children:ReactNode}){
   </button>;
 }
 
-function loginDestination(next:string|null){
-  return next&&next.startsWith("/")&&!next.startsWith("//")&&!next.includes("\\")?next:"/dashboard";
-}
-
 export function SignupForm(){
   const router=useRouter();
   const [businessName,setBusinessName]=useState("");
@@ -114,7 +110,6 @@ export function LoginForm({next}:{next:string|null}){
   const router=useRouter();
   const [email,setEmail]=useState("");
   const [password,setPassword]=useState("");
-  const [method,setMethod]=useState<"email"|"password">("email");
   const [busy,setBusy]=useState(false);
   const [error,setError]=useState<string|null>(null);
 
@@ -123,21 +118,15 @@ export function LoginForm({next}:{next:string|null}){
     setBusy(true);
     setError(null);
     try{
-      if(method==="email"){
-        const data=await post("resend",{email:email.trim(),purpose:"LOGIN"});
-        if(data.sent===false)throw new Error("We could not send your code. Please try again.");
-        router.push(`/verify?${new URLSearchParams({email:email.trim(),purpose:"login",next:loginDestination(next)}).toString()}`);
-        return;
-      }
       const data=await post("login",{email,password});
       const onboarded=Boolean(data?.merchant?.onboarding_completed);
-      const destination=onboarded?loginDestination(next):"/onboarding";
+      const destination=onboarded?(next&&next.startsWith("/")?next:"/dashboard"):"/onboarding";
       router.replace(destination);
       router.refresh();
     }catch(caught){
       const message=caught instanceof Error?caught.message:"Could not sign you in";
       if(/verify your email/i.test(message)){
-        router.push(`/verify?${new URLSearchParams({email,purpose:"login",next:loginDestination(next)}).toString()}`);
+        router.push(`/verify?${new URLSearchParams({email,purpose:"login"}).toString()}`);
         return;
       }
       setError(message);
@@ -149,23 +138,19 @@ export function LoginForm({next}:{next:string|null}){
     title="Welcome back"
     videoBackground
     cardless
-    subtitle="Your payments, devices and integrations. One account."
+    subtitle="Sign in to manage payments, transfers and settings."
     footer={<span>New to FlowPay? <a href="/signup">Create an account</a></span>}
   >
-    <div className="auth-methods" role="group" aria-label="Sign-in method">
-      <button type="button" aria-pressed={method==="email"} disabled={busy} onClick={()=>{setMethod("email");setError(null);}}>Email code</button>
-      <button type="button" aria-pressed={method==="password"} disabled={busy} onClick={()=>{setMethod("password");setError(null);}}>Password</button>
-    </div>
     <form onSubmit={submit}>
       {error?<Notice tone="error">{error}</Notice>:null}
       <Field label="Email" name="email" type="email" value={email} onChange={setEmail} placeholder="you@company.com" autoComplete="email"/>
-      {method==="password"?<Field label="Password" name="password" type="password" value={password} onChange={setPassword} placeholder="Your password" autoComplete="current-password"/>:<p className="auth-email-hint">We'll email you a six-digit code to sign in.</p>}
-      <Submit busy={busy}>{busy?(method==="email"?"Sending code...":"Signing in..."):(method==="email"?"Continue with email":"Sign in")}</Submit>
+      <Field label="Password" name="password" type="password" value={password} onChange={setPassword} placeholder="Your password" autoComplete="current-password"/>
+      <Submit busy={busy}>Sign in</Submit>
     </form>
   </AuthShell>;
 }
 
-export function VerifyForm({email,initialNotice,purpose="signup",next=null}:{email:string;initialNotice:string|null;purpose?:string;next?:string|null}){
+export function VerifyForm({email,initialNotice}:{email:string;initialNotice:string|null}){
   const router=useRouter();
   const [address,setAddress]=useState(email);
   const [code,setCode]=useState("");
@@ -190,7 +175,7 @@ export function VerifyForm({email,initialNotice,purpose="signup",next=null}:{ema
     try{
       const data=await post("verify",{email:address,code});
       const onboarded=Boolean(data?.merchant?.onboarding_completed);
-      router.replace(onboarded||next?.startsWith("/oauth/authorize")?loginDestination(next):"/onboarding");
+      router.replace(onboarded?"/dashboard":"/onboarding");
       router.refresh();
     }catch(caught){
       setError(caught instanceof Error?caught.message:"We could not verify that code");
@@ -204,8 +189,7 @@ export function VerifyForm({email,initialNotice,purpose="signup",next=null}:{ema
     setError(null);
     setNotice(null);
     try{
-      const result=await post("resend",{email:address,purpose:purpose==="login"?"LOGIN":"SIGNUP"});
-      if(result.sent===false)throw new Error("We could not send a new code. Please try again.");
+      await post("resend",{email:address,purpose:"SIGNUP"});
       setNotice(`A new code is on its way to ${address}.`);
       setCooldown(45);
     }catch(caught){
@@ -218,7 +202,7 @@ export function VerifyForm({email,initialNotice,purpose="signup",next=null}:{ema
   return <AuthShell
     title="Check your email"
     subtitle={address?`We sent a 6 digit code to ${address}.`:"Enter the 6 digit code we emailed you."}
-    footer={<span>Wrong address? <a href={purpose==="login"?`/login?${new URLSearchParams({next:loginDestination(next)}).toString()}`:"/signup"}>Start again</a></span>}
+    footer={<span>Wrong address? <a href="/signup">Start again</a></span>}
   >
     <form onSubmit={submit}>
       {error?<Notice tone="error">{error}</Notice>:null}
