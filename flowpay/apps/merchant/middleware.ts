@@ -24,6 +24,14 @@ function isPublic(pathname:string){
 const AUTH_PAGES=["/login","/signup","/verify"];
 
 export function middleware(request:NextRequest){
+  // Passkey responses must come from the origin registered by the API.
+  if(request.nextUrl.hostname==="www.pixuno.xyz"){
+    const canonical=request.nextUrl.clone();
+    canonical.hostname="pixuno.xyz";
+    canonical.protocol="https:";
+    canonical.port="";
+    return NextResponse.redirect(canonical,308);
+  }
   const {pathname}=request.nextUrl;
   if(pathname==="/")return NextResponse.next();
   if(isPublic(pathname))return NextResponse.next();
