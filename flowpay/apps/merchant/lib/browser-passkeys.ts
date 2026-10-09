@@ -11,7 +11,12 @@ function supported(){
 function serialize(credential:PublicKeyCredential){
   const response=credential.response;
   const base={id:credential.id,rawId:encode(credential.rawId),type:credential.type,extensions:credential.getClientExtensionResults()};
-  if(response instanceof AuthenticatorAttestationResponse)return {...base,response:{attestationObject:encode(response.attestationObject),clientDataJSON:encode(response.clientDataJSON),transports:response.getTransports()}};
+  if("attestationObject" in response){
+    const attestation=response as AuthenticatorAttestationResponse;
+    // Older passkey browsers can create credentials without exposing transport hints.
+    const transports=typeof attestation.getTransports==="function"?attestation.getTransports():[];
+    return {...base,response:{attestationObject:encode(attestation.attestationObject),clientDataJSON:encode(attestation.clientDataJSON),transports}};
+  }
   const assertion=response as AuthenticatorAssertionResponse;
   return {...base,response:{authenticatorData:encode(assertion.authenticatorData),clientDataJSON:encode(assertion.clientDataJSON),signature:encode(assertion.signature),userHandle:assertion.userHandle?encode(assertion.userHandle):null}};
 }
