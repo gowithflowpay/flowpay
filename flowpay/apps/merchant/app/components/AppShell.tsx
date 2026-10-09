@@ -1,5 +1,6 @@
 "use client";
 import "../workspace.scss";
+import "../mobile-workspace.scss";
 import {usePathname} from "next/navigation";
 import type {ReactNode} from "react";
 import {ChevronDownIcon} from "./Icons";
@@ -32,7 +33,7 @@ export function AppShell({
   return <div className="app-shell clean-shell">
     <header className="topbar">
       <a className="logo" href="/dashboard"><span>FlowPay</span></a>
-      <Sidebar/>
+      <Sidebar merchantName={merchantName}/>
       <div className="topbar-actions">
         <ThemeToggle/>
         <a className="store-switcher" href="/settings" title={contactName??undefined}>
